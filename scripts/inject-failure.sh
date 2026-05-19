@@ -52,13 +52,14 @@ STATE_FILE="${REPO_ROOT}/.failure-state"
 NAMESPACE="${NAMESPACE:-$(kubectl config view --minify -o jsonpath='{..namespace}' 2>/dev/null || echo 'default')}"
 
 # ── Scenario catalogue ─────────────────────────────────────────────────────────
-# Format: "id|type|target|variant|hint|explanation|kibana_path"
-#   type    — "flagd" or "chaos-mesh"
-#   target  — flag name (flagd) or manifest path relative to REPO_ROOT (chaos-mesh)
-#   variant — flag variant (flagd) or "-" (chaos-mesh, not applicable)
-#   hint    — vague symptom hint, safe to share with participant
-#   explanation — full answer shown on --reveal / --revert
-#   kibana_path — where to look in Kibana
+# Format: "id|type|target|variant|hint|symptoms|root_cause|kibana_path"
+#   type       — "flagd" or "chaos-mesh"
+#   target     — flag name (flagd) or manifest path relative to REPO_ROOT (chaos-mesh)
+#   variant    — flag variant (flagd) or "-" (chaos-mesh, not applicable)
+#   hint       — vague symptom hint, safe to share with participant
+#   symptoms   — detailed observable effects shown on --reveal
+#   root_cause — the underlying cause of the failure shown on --reveal
+#   kibana_path — where to look in Kibana to investigate
 declare -a SCENARIOS=(
 
   # ── flagd scenarios (application-layer) ──────────────────────────────────────
@@ -66,108 +67,188 @@ declare -a SCENARIOS=(
   "payment-partial|flagd|paymentFailure|50%|\
 Customers are reporting intermittent checkout failures. Roughly half of purchase \
 attempts seem to be failing, but it's not consistent.|\
-The payment service charge method is configured to fail 50% of the time. Look for \
-an error rate spike on checkoutservice in APM → Services, then drill into a failing \
-trace — the paymentservice span will show the error.|\
-APM → Services → checkoutservice → Transactions → POST /hipstershop.CheckoutService/PlaceOrder"
+Roughly 50% of checkout attempts fail with a payment error. The error rate on \
+checkoutservice spikes noticeably. Individual failing traces show the paymentservice \
+span erroring — not a connection failure, but an explicit error response from the \
+payment service itself. Error volume is steady, not spiking or recovering.|\
+The paymentFailure flagd flag is set to 50%, instructing the payment service charge \
+method to return a failure on half of all calls. This is a deliberate application-level \
+fault — the pod is healthy, the network is fine, and the service is reachable. The \
+error is injected in code, not at the infrastructure layer.|\
+APM → Services → checkoutservice → Transactions → POST /hipstershop.CheckoutService/PlaceOrder — drill into a failing trace and inspect the paymentservice span"
 
   "payment-down|flagd|paymentUnreachable|on|\
 The checkout flow appears to be completely broken. Users cannot complete any purchases.|\
-The checkoutservice is using a bad address for paymentservice, simulating a network \
-outage. Look for connection errors on the checkoutservice → paymentservice edge in \
-APM → Service Map.|\
-APM → Service Map — broken edge between checkoutservice and paymentservice"
+100% of checkout attempts fail. Traces show the error occurring before the \
+paymentservice span even executes — the connection is refused or the address is \
+unreachable. The Service Map shows the checkoutservice to paymentservice edge as \
+broken. Unlike partial failures, every single checkout fails immediately.|\
+The paymentUnreachable flagd flag is enabled, reconfiguring checkoutservice to use \
+an invalid address for paymentservice. The error happens at the TCP connection level \
+before any application code runs on the payment side. This is distinct from \
+paymentFailure — the service is not returning errors, it is simply not being reached.|\
+APM → Service Map — broken edge between checkoutservice and paymentservice. APM → Services → checkoutservice → Transactions — 100% error rate, connection errors in trace waterfall"
 
   "cart-errors|flagd|cartFailure|on|\
 Users are having trouble with their shopping carts. Adding items seems fine but \
 something goes wrong at checkout.|\
-The cartservice is returning an error on every EmptyCart call, which is triggered \
-during checkout. Look for 100% error rate on cartservice in APM → Services.|\
-APM → Services → cartservice → Transactions → grpc route errors"
+Cart browsing and adding items works normally. Failures only appear at checkout. \
+The cartservice shows a 100% error rate specifically on EmptyCart RPC calls. Other \
+cart operations (GetCart, AddItem) are unaffected. The error is consistent — every \
+single checkout attempt fails at the same point.|\
+The cartFailure flagd flag is enabled, causing cartservice to return an error on \
+every EmptyCart call. EmptyCart is invoked by checkoutservice at the end of a \
+successful order to clear the basket — so all checkouts fail at the final step \
+despite earlier steps succeeding. The cart pod is healthy; the fault is in the \
+application logic.|\
+APM → Services → cartservice → Transactions → grpc — filter to EmptyCart, 100% error rate. Cross-reference with APM → Services → checkoutservice failing at the cart call step"
 
   "product-missing|flagd|productCatalogFailure|on|\
 A specific product page is returning errors. The rest of the catalogue seems fine.|\
-The productcatalogservice is failing GetProduct requests for product ID OLJCESPC7Z. \
-Look for errors on productcatalogservice in APM → Services and filter to GetProduct traces.|\
-APM → Services → productcatalogservice → Transactions → GetProduct"
+The product catalogue loads normally for almost all products. One specific product \
+(ID: OLJCESPC7Z) consistently returns an error every time its page is loaded. \
+There is no intermittency — every request for this product fails, every request \
+for other products succeeds.|\
+The productCatalogFailure flagd flag is enabled, making productcatalogservice return \
+an error specifically on GetProduct requests for product ID OLJCESPC7Z. All other \
+product IDs are unaffected. The fault is targeted at a single resource, simulating \
+a corrupted or missing product entry.|\
+APM → Services → productcatalogservice → Transactions → GetProduct — filter traces by error, confirm all errors reference the same product ID"
 
   "ad-errors|flagd|adFailure|on|\
 The site is running but there are some intermittent errors occurring in a background \
 service. Users may not notice directly.|\
-The adservice is generating errors on roughly 1 in 10 GetAds calls. Look for a low \
-but steady error rate on adservice in APM → Services.|\
-APM → Services → adservice → Transactions → oteldemo.AdService/GetAds"
+A low but steady error rate appears on the adservice — roughly 1 in 10 GetAds calls \
+return an error. The failures are probabilistic with no consistent pattern (not tied \
+to a specific user, product, or time). The shopping experience is largely unaffected \
+since ads are non-critical, but the error rate is clearly visible in APM.|\
+The adFailure flagd flag is enabled, making adservice return an error on approximately \
+10% of GetAds requests. The selection of which requests fail is random. This simulates \
+an unreliable downstream dependency that fails sporadically without a clear cause.|\
+APM → Services → adservice → Transactions → oteldemo.AdService/GetAds — error rate chart shows ~10% steady failure rate"
 
   "llm-rate-limit|flagd|llmRateLimitError|on|\
 The AI product review feature is behaving erratically — sometimes it works, \
 sometimes it doesn't.|\
-The llmservice is intermittently returning HTTP 429 rate limit errors. Look for \
-errors on llmservice in APM → Services.|\
-APM → Services → llmservice → Errors"
+The AI product review summary feature works on some requests and fails on others \
+with no clear pattern. Failed requests return HTTP 429 errors. The failure is \
+intermittent — refreshing the page sometimes returns a review, sometimes an error. \
+No other services are affected.|\
+The llmRateLimitError flagd flag is enabled, causing llmservice to intermittently \
+return HTTP 429 (Too Many Requests) responses. This simulates a real-world LLM API \
+rate limit being hit in production. The fault is in the llmservice application code, \
+not the underlying LLM infrastructure.|\
+APM → Services → llmservice → Errors — HTTP 429 errors. APM → Services → llmservice → Transactions — intermittent error rate"
 
   "image-slow|flagd|imageSlowLoad|5sec|\
 The website feels sluggish. Page loads are completing but something is noticeably \
 slower than usual.|\
-Envoy fault injection is adding a 5-second delay to all product image requests. \
-Look for increased latency on the frontend in APM → Services — specifically HTTP \
-GET requests for images.|\
-APM → Services → frontend → Transactions — elevated p99 latency"
+The storefront loads but product images each take approximately 5 seconds to appear. \
+The page structure, navigation, and API responses are all fast — only image loading \
+is slow. Frontend p99 latency is significantly elevated. The slowness is consistent \
+across all product images on every page.|\
+The imageSlowLoad flagd flag is set to 5sec, which activates Envoy fault injection \
+on the frontend proxy. A 5-second artificial delay is added to every HTTP response \
+serving product images. This is an Envoy-level fault, not an application code change \
+— the delay is injected at the proxy layer before the response reaches the browser.|\
+APM → Services → frontend → Transactions — filter to image GET requests, elevated p99. Compare image request latency vs API call latency to confirm only images are affected"
 
   "kafka-lag|flagd|kafkaQueueProblems|on|\
 Some backend processing seems to be falling behind. Orders are completing but \
 downstream services appear delayed.|\
-The Kafka queue is being overloaded with messages and a consumer-side delay has \
-been introduced. Look for consumer lag in APM → Services and check \
-accountingservice and frauddetectionservice latency.|\
-APM → Services → accountingservice / frauddetectionservice — latency spike"
+Checkout completes successfully and the frontend reports orders as placed. However, \
+downstream accounting and fraud detection services show growing latency and \
+increasing consumer lag. The Kafka consumer group is falling behind — messages \
+are produced faster than they are consumed. Over time the lag grows.|\
+The kafkaQueueProblems flagd flag is enabled, which overloads the Kafka topic with \
+excess messages and introduces an artificial consumer-side processing delay in \
+accountingservice and frauddetectionservice. The fault is in the message processing \
+pipeline, not the order placement flow — which is why checkout appears to succeed \
+while downstream processing silently falls behind.|\
+APM → Services → accountingservice and frauddetectionservice — consumer lag metric and latency spike. Logs → filter to kafka consumer errors or slow processing messages"
 
   # ── Chaos Mesh scenarios (infrastructure-layer) ───────────────────────────────
 
   "chaos-net-delay-checkout|chaos-mesh|chaos-mesh/scenarios/ctb-network-delay-checkout.yaml|-|\
 Checkout is extremely slow. Users can still place orders but it takes much longer \
 than expected — the issue doesn't look like a normal application error.|\
-Chaos Mesh is injecting a 2-second network delay (±500ms jitter) on the \
-checkoutservice pod at the infrastructure level. Look for a sharp p99 latency \
-spike on checkoutservice in APM → Services. Note: this is a network-layer fault, \
-not an application error, so error rates may stay low while latency climbs.|\
-APM → Services → checkoutservice → Latency — elevated p99 / p95"
+Checkout transactions complete but take 2+ seconds longer than normal. The p95 and \
+p99 latency on checkoutservice are sharply elevated. Error rates remain low — \
+requests are slow, not failing. Other services appear unaffected. The latency \
+increase is uniform across all checkout transactions with no correlation to user, \
+product, or time of day.|\
+Chaos Mesh is injecting a 2-second network delay with 500ms jitter at the kernel \
+network layer on the checkoutservice pod. Unlike an application-level slowdown, \
+this affects all network I/O to and from the pod — including health checks and \
+service-to-service calls. The pod is healthy and the application code is running \
+normally; only its network is throttled. This cannot be detected by inspecting \
+application logs or error rates — only latency metrics reveal the fault.|\
+APM → Services → checkoutservice → Latency tab — p95/p99 spike with low error rate. Compare with other services to confirm the fault is isolated to checkout"
 
   "chaos-pod-fail-cart|chaos-mesh|chaos-mesh/scenarios/ctb-pod-failure-cart.yaml|-|\
 The cart service appears to be completely unavailable. Users cannot add items or \
 proceed to checkout — the pod itself seems unhealthy.|\
-Chaos Mesh has forced the cartservice pod into a failure state at the container \
-level. The pod shows as unavailable in Kubernetes. Look in Infrastructure → \
-Kubernetes → Pods for the cart pod status, and in APM → Services for connection \
-errors from services that depend on cart.|\
-Infrastructure → Kubernetes → Pods (cart pod NotReady) + APM → Services → cart errors"
+The cart service is completely unavailable. Unlike the flagd cartFailure scenario \
+where the pod is healthy but returns application errors, here the pod itself is \
+NotReady — Kubernetes has stopped routing traffic to it. Dependent services receive \
+connection refused errors rather than application-level error responses. The error \
+signature in APM traces is a transport-level failure, not a gRPC error code.|\
+Chaos Mesh has injected a pod-failure fault on the cart pod, forcing all containers \
+into a failed state at the container runtime level. Kubernetes marks the pod as \
+unhealthy and stops routing traffic to it. The application is not running — no code \
+is executing. This is an infrastructure fault, not a code fault. Kibana Infrastructure \
+will show the pod as NotReady; APM will show connection errors from services that \
+depend on cart.|\
+Infrastructure → Kubernetes → Pods — cart pod NotReady status. APM → Services → cartservice — connection errors (not gRPC errors). APM → Service Map — broken edges from checkout and frontend to cart"
 
   "chaos-cpu-stress-frontend|chaos-mesh|chaos-mesh/scenarios/ctb-cpu-stress-frontend.yaml|-|\
 The frontend is noticeably slower than usual. Everything is technically working \
 but response times are up across the board. The issue seems to be at the \
 infrastructure level rather than in the application code.|\
-Chaos Mesh is running 2 CPU stress workers at 80% load on the frontend pod. \
-Look in Infrastructure → Kubernetes → Pods for a CPU spike on the frontend pod, \
-and in APM → Services → frontend for increased latency on all transactions.|\
-Infrastructure → Kubernetes → Pods (frontend CPU spike) + APM → Services → frontend latency"
+All frontend transactions show elevated latency — not a single slow endpoint but \
+everything is slower uniformly. Error rates are not elevated. CPU utilisation on \
+the frontend pod is abnormally high. The latency increase correlates with the CPU \
+spike. No application errors are logged — the service is resource-starved, not broken.|\
+Chaos Mesh is running 2 CPU stress workers at 80% load on the frontend pod at the \
+OS level, consuming CPU cycles that would otherwise serve HTTP requests. The Go \
+HTTP server has fewer resources available, causing across-the-board latency \
+increases. There are no application errors because the code is functioning \
+correctly — it is simply waiting for CPU time. The fault is invisible to application \
+logs and only visible in infrastructure metrics.|\
+Infrastructure → Kubernetes → Pods — frontend pod CPU spike. APM → Services → frontend → Transactions — all transactions show increased latency (not isolated to one endpoint)"
 
   "chaos-net-loss-payment|chaos-mesh|chaos-mesh/scenarios/ctb-network-loss-payment.yaml|-|\
 Payment is failing intermittently and inconsistently. Sometimes it works, sometimes \
 it doesn't — and the pattern doesn't seem related to any specific user or product.|\
-Chaos Mesh is dropping 50% of network packets to/from the paymentservice pod. \
-Unlike the flagd payment failure which errors at the application layer, this is \
-network-level packet loss causing sporadic connection failures. Look for \
-intermittent errors on paymentservice in APM → Services and compare trace \
-patterns to identify the network vs application signature.|\
-APM → Services → paymentservice — intermittent errors, no consistent error message"
+Payment errors are intermittent with no consistent pattern — sometimes checkout \
+succeeds, sometimes it fails, with no correlation to user, product, or time. Traces \
+show TCP-level connection failures or timeouts rather than clean application error \
+responses. The error signature differs from the flagd paymentFailure scenario: \
+instead of a clear error message from the payment service, traces show retries, \
+timeouts, or abrupt connection closes.|\
+Chaos Mesh is dropping 50% of network packets with 25% correlation to and from \
+the paymentservice pod at the kernel network layer. Unlike the flagd paymentFailure \
+flag (which returns a deliberate error from application code), this fault causes \
+TCP connections to degrade — packets are silently dropped and the connection times \
+out or retries. This is harder to diagnose because there is no error message from \
+the payment service itself; the failure manifests as a network timeout upstream.|\
+APM → Services → paymentservice — intermittent errors with inconsistent messages (timeouts vs errors). Compare trace error type to flagd payment failures: TCP timeout vs application error response is the key diagnostic difference"
 
   "chaos-pod-fail-recommendation|chaos-mesh|chaos-mesh/scenarios/ctb-pod-failure-recommendation.yaml|-|\
 Product recommendations have stopped appearing on product pages. Everything else \
 on the site seems fine.|\
-Chaos Mesh has forced the recommendationservice pod into a failure state. The pod \
-is unavailable and the frontend falls back gracefully. Look in Infrastructure → \
-Kubernetes → Pods for the recommendation pod status, and in APM → Services → \
-frontend for errors on calls to recommendationservice.|\
-Infrastructure → Kubernetes → Pods (recommendation pod NotReady) + APM → Service Map"
+Product recommendation widgets are absent from product pages. The rest of the \
+storefront functions normally — the frontend handles the missing service gracefully \
+with a fallback. The recommendation pod shows as NotReady in Kubernetes. Dependent \
+calls in APM traces show connection errors to recommendationservice rather than \
+application-level errors.|\
+Chaos Mesh has forced the recommendationservice pod into a failure state at the \
+container runtime level. The pod is not running — no application code is executing. \
+The frontend is designed to degrade gracefully when recommendations are unavailable, \
+so users see missing widgets rather than hard errors. This fault is only clearly \
+visible at the infrastructure layer (pod health) and in APM trace edges to the \
+recommendation service.|\
+Infrastructure → Kubernetes → Pods — recommendationservice pod NotReady. APM → Service Map — broken edge from frontend to recommendationservice. APM → Services → frontend — traces show connection errors on recommendation calls"
 
 )
 
@@ -294,12 +375,13 @@ print_reveal() {
   local scenario
   scenario=$(get_scenario "$scenario_id") || { warn "Unknown scenario: ${scenario_id}"; return 1; }
 
-  local type target variant explanation kibana_path
+  local type target variant symptoms root_cause kibana_path
   type=$(scenario_field "$scenario" 2)
   target=$(scenario_field "$scenario" 3)
   variant=$(scenario_field "$scenario" 4)
-  explanation=$(scenario_field "$scenario" 6)
-  kibana_path=$(scenario_field "$scenario" 7)
+  symptoms=$(scenario_field "$scenario" 6)
+  root_cause=$(scenario_field "$scenario" 7)
+  kibana_path=$(scenario_field "$scenario" 8)
 
   local type_label
   [[ "$type" == "flagd" ]] && type_label="flagd (application)" || type_label="Chaos Mesh (infrastructure)"
@@ -315,8 +397,11 @@ print_reveal() {
     echo -e "  ${BOLD}Manifest:${NC} ${target}"
   fi
   blank
-  echo -e "  ${BOLD}What happened:${NC}"
-  echo -e "  ${explanation}" | fold -s -w 72 | sed 's/^/  /'
+  echo -e "  ${BOLD}Symptoms:${NC}"
+  echo "  ${symptoms}" | fold -s -w 72 | sed 's/^/  /'
+  blank
+  echo -e "  ${BOLD}Root cause:${NC}"
+  echo "  ${root_cause}" | fold -s -w 72 | sed 's/^/  /'
   blank
   echo -e "  ${BOLD}Where to look in Kibana:${NC}"
   echo -e "  ${CYAN}${kibana_path}${NC}"
@@ -480,14 +565,15 @@ cmd_preview() {
     chosen_scenario="${pool[$idx]}"
   fi
 
-  local scenario_id type target variant hint explanation kibana_path
+  local scenario_id type target variant hint symptoms root_cause kibana_path
   scenario_id=$(scenario_field "$chosen_scenario" 1)
   type=$(scenario_field "$chosen_scenario" 2)
   target=$(scenario_field "$chosen_scenario" 3)
   variant=$(scenario_field "$chosen_scenario" 4)
   hint=$(scenario_field "$chosen_scenario" 5)
-  explanation=$(scenario_field "$chosen_scenario" 6)
-  kibana_path=$(scenario_field "$chosen_scenario" 7)
+  symptoms=$(scenario_field "$chosen_scenario" 6)
+  root_cause=$(scenario_field "$chosen_scenario" 7)
+  kibana_path=$(scenario_field "$chosen_scenario" 8)
 
   local type_label target_display
   if [[ "$type" == "flagd" ]]; then
@@ -521,8 +607,11 @@ cmd_preview() {
   blank
   echo -e "  ${BOLD}What --reveal would show:${NC}"
   blank
-  echo -e "    ${BOLD}What happened:${NC}"
-  echo -e "    ${explanation}" | fold -s -w 68 | sed 's/^/    /'
+  echo -e "    ${BOLD}Symptoms:${NC}"
+  echo "    ${symptoms}" | fold -s -w 68 | sed 's/^/    /'
+  blank
+  echo -e "    ${BOLD}Root cause:${NC}"
+  echo "    ${root_cause}" | fold -s -w 68 | sed 's/^/    /'
   blank
   echo -e "    ${BOLD}Where to look in Kibana:${NC}"
   echo -e "    ${CYAN}${kibana_path}${NC}"

@@ -173,7 +173,7 @@ Infrastructure → Kubernetes → Pods (recommendation pod NotReady) + APM → S
 
 # ── Helper: filter scenario pool by type ─────────────────────────────────────
 # Returns a new array (by printing entries) filtered to the given type.
-# Usage: mapfile -t POOL < <(filter_scenarios "chaos-mesh")
+# Usage: pool=(); while IFS= read -r s; do pool+=("$s"); done < <(filter_scenarios "chaos-mesh")
 filter_scenarios() {
   local filter_type="$1"
   for scenario in "${SCENARIOS[@]}"; do
@@ -334,7 +334,7 @@ cmd_list() {
 
   local -a pool
   if [[ "$chaos_only" == true ]]; then
-    mapfile -t pool < <(filter_scenarios "chaos-mesh")
+    pool=(); while IFS= read -r s; do pool+=("$s"); done < <(filter_scenarios "chaos-mesh")
     blank
     echo -e "${BOLD}Chaos Mesh scenarios (infrastructure-layer):${NC}"
   else
@@ -471,7 +471,7 @@ cmd_preview() {
   else
     local -a pool
     if [[ "$chaos_only" == true ]]; then
-      mapfile -t pool < <(filter_scenarios "chaos-mesh")
+      pool=(); while IFS= read -r s; do pool+=("$s"); done < <(filter_scenarios "chaos-mesh")
       (( ${#pool[@]} == 0 )) && die "No Chaos Mesh scenarios found."
     else
       pool=("${SCENARIOS[@]}")
@@ -586,7 +586,7 @@ cmd_inject() {
   else
     local -a pool
     if [[ "$chaos_only" == true ]]; then
-      mapfile -t pool < <(filter_scenarios "chaos-mesh")
+      pool=(); while IFS= read -r s; do pool+=("$s"); done < <(filter_scenarios "chaos-mesh")
       (( ${#pool[@]} == 0 )) && die "No Chaos Mesh scenarios found."
     else
       pool=("${SCENARIOS[@]}")

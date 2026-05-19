@@ -652,8 +652,9 @@ EOF
       echo -e "  ${DIM}Note: Chaos Mesh effects auto-revert after 30 min if not reverted manually.${NC}"
       blank
     fi
-    echo -e "  ${DIM}Run --reveal for the full explanation and Kibana path.${NC}"
-    echo -e "  ${DIM}Run --revert when the session is done.${NC}"
+    echo -e "  ${DIM}./scripts/inject-failure.sh --status   # check current failure${NC}"
+    echo -e "  ${DIM}./scripts/inject-failure.sh --reveal   # full explanation + Kibana path${NC}"
+    echo -e "  ${DIM}./scripts/inject-failure.sh --revert   # reset when done${NC}"
     echo -e "${BOLD}${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
   fi
 

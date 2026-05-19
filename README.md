@@ -1,6 +1,6 @@
 # OTel Failure Scenarios
 
-Provision the [OpenTelemetry Astronomy Shop](https://github.com/open-telemetry/opentelemetry-demo) running on a GKE Autopilot cluster and sending data to an Elastic Cloud (ESS) cluster. Trigger failure scenarios via flagd or [Chaos Mesh](https://chaos-mesh.org/), then analyse the results in Kibana.
+Provision the [OpenTelemetry Astronomy Shop](https://github.com/open-telemetry/opentelemetry-demo) running on a GKE Autopilot cluster and sending data to an Elastic Cloud (ESS) cluster. Trigger failure scenarios via flagd (application-layer flags), realistic K8s-native faults (bad deployments, config changes, resource limits), or [Chaos Mesh](https://chaos-mesh.org/) (scheduled infrastructure experiments) — then analyse the results in Kibana.
 
 > This project was designed based on guidance from the [Elastic Observability Test Environments — OpenTelemetry Quick Start](https://studious-disco-k66oojq.pages.github.io/user-guide/opentelemetry-quick-start/#create-a-opentelemetry-demo-cluster).
 
@@ -19,7 +19,7 @@ Provision the [OpenTelemetry Astronomy Shop](https://github.com/open-telemetry/o
 ## Why this over running the OTel demo locally?
 
 - **Cloud-hosted infrastructure** — your laptop will struggle to run a 20-service Kubernetes cluster under load; GKE Autopilot scales automatically
-- **Chaos Mesh infrastructure faults** — inject failures that AI agents won't recognise out of the box; the flagd scenarios are in the OTel demo docs and likely in model training data, so agents can identify them by name without actually diagnosing anything
+- **Realistic K8s-native infrastructure faults** — inject failures that look like real production incidents (misconfigured resource limits, NetworkPolicy mistakes, Service selector mismatches); the flagd scenarios are in the OTel demo docs and likely in model training data, so agents can identify them by name without actually diagnosing anything
 - **Real GCP infrastructure** — inspect nodes, pods, and networking in the GCP console or with `gcloud`, not just in a local Docker environment
 - **Full `kubectl` access** — manage deployments, inspect logs, and apply manifests against a real cluster just as you would in production
 
@@ -36,8 +36,9 @@ Provision the [OpenTelemetry Astronomy Shop](https://github.com/open-telemetry/o
 - [Triggering Failure Scenarios](#triggering-failure-scenarios)
   - [Method 1: flagd — controlled failures](#method-1-flagd--controlled-failures)
   - [Method 2: Capture the Bug — random injection](#method-2-capture-the-bug--random-injection)
-  - [Method 3: Chaos Mesh — infrastructure faults](#method-3-chaos-mesh--infrastructure-faults)
+  - [Method 3: Chaos Mesh — scheduled infrastructure experiments](#method-3-chaos-mesh--scheduled-infrastructure-experiments)
 - [Failure Scenario Catalogue](docs/failure-scenarios.md)
+- [FAQ](#faq)
 - [Cluster Management](#cluster-management)
 
 ---
@@ -297,17 +298,10 @@ Use `toggle-flag.sh` to set a specific flag from the terminal. It patches the fl
 ./scripts/toggle-flag.sh imageSlowLoad on --variant="5sec"
 ```
 
-Check which flags are currently active:
+Check which flags are currently active (catches flags set via the UI too):
 
 ```bash
-./scripts/list-flags.sh              # All flags
-./scripts/list-flags.sh --active-only  # Only flags that are on
-```
-
-Reset everything to off in one go:
-
-```bash
-./scripts/reset-flags.sh
+./scripts/toggle-flag.sh --status
 ```
 
 > **Note:** flagd copies its ConfigMap to a local volume on startup and doesn't watch for changes — a pod restart is required after each change. `toggle-flag.sh` handles this automatically. See [upstream issue #1953](https://github.com/open-telemetry/opentelemetry-demo/issues/1953).
@@ -324,9 +318,9 @@ curl -s -X POST http://localhost:8080/flagservice/flagd.evaluation.v1.Service/Re
 
 ### Method 2: Capture the Bug — random injection
 
-`inject-failure.sh` is designed for **guided demo sessions** where a participant investigates a live failure in Kibana without being told what went wrong. The operator injects a random scenario from a unified pool of **flagd (application-layer)** and **Chaos Mesh (infrastructure-layer)** failures; the participant finds it.
+`inject-failure.sh` is designed for **guided demo sessions** where a participant investigates a live failure in Kibana without being told what went wrong. The operator injects a random scenario from a unified pool of **flagd (application-layer)** and **K8s-native (infrastructure-layer)** failures; the participant finds it.
 
-> **GCP cost note:** Scenarios that cause sustained CPU spikes, memory leaks, or traffic floods (`emailMemoryLeak`, `loadGeneratorFloodHomepage`, `recommendationCacheFailure`, `adHighCpu`, `failedReadinessProbe`) are intentionally excluded from the random pool. Use `toggle-flag.sh` directly if you need them. Chaos Mesh scenarios auto-revert after 30 minutes if not manually reverted.
+> **GCP cost note:** Scenarios that cause sustained CPU spikes, memory leaks, or traffic floods (`emailMemoryLeak`, `loadGeneratorFloodHomepage`, `recommendationCacheFailure`, `adHighCpu`, `failedReadinessProbe`) are intentionally excluded from the random pool. Use `toggle-flag.sh` directly if you need them. K8s-native faults persist until explicitly reverted with `--revert`.
 
 #### Typical session flow
 
@@ -350,28 +344,30 @@ Use `--quiet` to hide which scenario was triggered from everyone, including your
 ```bash
 ./scripts/inject-failure.sh                             # Random injection (operator sees the scenario)
 ./scripts/inject-failure.sh --quiet                     # Random injection, scenario hidden from everyone
-./scripts/inject-failure.sh --chaos-only                # Random Chaos Mesh scenario only (excludes flagd)
-./scripts/inject-failure.sh --quiet --chaos-only        # Quiet + Chaos Mesh only
+./scripts/inject-failure.sh --infra-only                # Random infrastructure scenario only (excludes flagd)
+./scripts/inject-failure.sh --quiet --infra-only        # Quiet + infrastructure only
 ./scripts/inject-failure.sh --scenario=<id>             # Inject a specific scenario by ID
 ./scripts/inject-failure.sh --preview                   # Preview a random scenario without triggering it
-./scripts/inject-failure.sh --preview --chaos-only      # Preview a random Chaos Mesh scenario
+./scripts/inject-failure.sh --preview --infra-only      # Preview a random infrastructure scenario
 ./scripts/inject-failure.sh --preview --scenario=<id>   # Preview a specific scenario
 ./scripts/inject-failure.sh --status                    # Show a vague symptom hint (safe to share)
+./scripts/inject-failure.sh --check                     # Full health check: k8s state + all live flagd flags
 ./scripts/inject-failure.sh --reveal                    # Reveal the full answer + Kibana path
-./scripts/inject-failure.sh --revert                    # Reset flags/chaos, clear state, reveal what was active
+./scripts/inject-failure.sh --revert                    # Reset the active k8s/flagd fault, reveal what was active
+./scripts/inject-failure.sh --reset-all                 # Clear everything — k8s fault + all non-off flagd flags
 ./scripts/inject-failure.sh --list                      # List all available scenarios
-./scripts/inject-failure.sh --list --chaos-only         # List only Chaos Mesh scenarios
+./scripts/inject-failure.sh --list --infra-only         # List only infrastructure scenarios
 ```
 
-#### Testing AI agents — use `--chaos-only`
+#### Testing AI agents — use `--infra-only`
 
-When using this demo to evaluate AI agents (e.g. Kibana AI Assistant, Elastic Agent), use `--chaos-only` to restrict the random pool to **Chaos Mesh infrastructure failures only**:
+When using this demo to evaluate AI agents (e.g. Kibana AI Assistant, Elastic Agent), use `--infra-only` to restrict the random pool to **K8s-native infrastructure failures only**:
 
 ```bash
-./scripts/inject-failure.sh --chaos-only
+./scripts/inject-failure.sh --infra-only
 ```
 
-flagd failures are well-documented in the official OpenTelemetry Demo documentation and are likely to be in an AI model's training data — the agent may recognise symptoms by name. Chaos Mesh failures operate at the infrastructure layer (network packets, pod lifecycle, CPU scheduling) and are not described in the OTel demo docs, making them a more genuine test of the agent's diagnostic ability.
+flagd failures are well-documented in the official OpenTelemetry Demo documentation and are likely to be in an AI model's training data — the agent may recognise symptoms by name. K8s-native faults (misconfigured resource limits, NetworkPolicy blocks, Service selector mismatches) look like real production incidents and require genuine diagnosis using `kubectl`, APM, and Infrastructure metrics — not pattern matching against documentation.
 
 #### Available scenarios
 
@@ -388,23 +384,39 @@ flagd failures are well-documented in the official OpenTelemetry Demo documentat
 | `image-slow` | Product images take 5s to load | APM → frontend latency increase |
 | `kafka-lag` | Backend processing falls behind | APM → consumer lag, downstream latency |
 
-**Chaos Mesh — infrastructure-layer failures**
+**K8s-native — realistic infrastructure failures**
 
-| ID | What breaks | Observable in Kibana |
-|----|-------------|----------------------|
-| `chaos-net-delay-checkout` | 2s network delay on checkout pod | APM → checkoutservice p99 latency spike |
-| `chaos-pod-fail-cart` | Cart pod forced into failure state | Infrastructure → cart pod NotReady + APM errors |
-| `chaos-cpu-stress-frontend` | 80% CPU stress on frontend pod | Infrastructure → frontend CPU spike + APM latency |
-| `chaos-net-loss-payment` | 50% packet loss on payment pod | APM → paymentservice intermittent connection errors |
-| `chaos-pod-fail-recommendation` | Recommendation pod forced unavailable | Infrastructure → pod NotReady + APM service map |
+| ID | Root cause | Realistic story | Observable in Kibana |
+|----|------------|-----------------|----------------------|
+| `chaos-pod-fail-recommendation` | `recommendation` deployment scaled to 0 replicas | Auto-scaling cost-review script zeroed replicas; GitOps PR approved without noticing | APM → recommendation dark (no throughput), product pages timeout |
+| `chaos-pod-fail-cart` | `VALKEY_ADDR` env var set to wrong Redis hostname | Cache-migration PR pointed cart at a non-existent Redis instance | kubectl → cart in CrashLoopBackOff, startup crash: "Wasn't able to connect to redis" |
+| `chaos-net-delay-checkout` | CPU limit `2m` added to checkout | VPA rightsizing tool sampled during quiet window; PR approved without understanding millicores | APM → checkout latency spike, error rate flat; `kubectl top` shows CPU throttled |
+| `chaos-net-loss-payment` | Memory limit lowered to `25Mi` | Memory-audit PR set limit below Node.js runtime overhead | kubectl → payment pod OOMKilled repeatedly, bursty payment errors in APM |
+| `chaos-cpu-stress-frontend` | CPU limit `5m` added to frontend | Platform script had unit conversion bug — wrote `5m` instead of `500m` | APM → all frontend transactions uniformly slower; `kubectl top` shows CPU at limit |
 
 The active scenario is saved to `.failure-state` (gitignored) so it persists across terminal sessions. Running `--revert` always tells you what was active, even if the session was started by someone else.
 
 ---
 
-### Method 3: Chaos Mesh — infrastructure faults
+#### Checking for active failures and clearing everything
 
-Chaos Mesh injects infrastructure-level faults — network latency, pod kills, memory pressure, IO errors — that go beyond what flagd can simulate.
+Use these two commands any time — they cover **both** K8s-native faults and flagd flags, regardless of whether they were set via the script, the browser UI, or `toggle-flag.sh` directly:
+
+```bash
+# See exactly what's active right now
+./scripts/inject-failure.sh --check
+
+# Clear everything in one shot (k8s fault + all non-off flagd flags)
+./scripts/inject-failure.sh --reset-all
+```
+
+`--check` shows the K8s state file and all live flagd flag variants side by side. `--reset-all` is safe to run at any time — it tells you what it cleared, or confirms nothing needed clearing.
+
+---
+
+### Method 3: Chaos Mesh — scheduled infrastructure experiments
+
+Chaos Mesh injects infrastructure-level faults — network latency, pod kills, memory pressure, IO errors — on a repeating schedule. These are separate from the Capture the Bug pool and are applied manually.
 
 #### Access the Chaos Mesh UI
 
@@ -448,8 +460,126 @@ kubectl delete -f chaos-mesh/network-delay-frontend.yaml
 
 ## Failure Scenario Catalogue
 
-Full details for every flagd flag (variants, affected services, Kibana paths, and toggle commands) are in **[docs/failure-scenarios.md](docs/failure-scenarios.md)**.
+Full details for every scenario — flagd flags (variants, affected services, Kibana paths, toggle commands) and K8s-native faults (kubectl investigation steps, root cause, revert procedure) — are in **[docs/failure-scenarios.md](docs/failure-scenarios.md)**.
 
+
+## FAQ
+
+**Q: How do I check if any failures are currently active?**
+
+Run this one command — it checks both K8s-native faults and flagd flags in one shot, regardless of how they were triggered (script, browser UI, or direct `kubectl`):
+
+```bash
+./scripts/inject-failure.sh --check
+```
+
+---
+
+**Q: Something looks broken in the demo. How do I reset everything to a clean state?**
+
+```bash
+./scripts/inject-failure.sh --reset-all
+```
+
+This reverts any active K8s fault (scaled deployments, bad env vars, CPU/memory limits) and resets every flagd flag back to `off`. Safe to run at any time — it reports what it cleared, or confirms nothing needed clearing.
+
+---
+
+**Q: I turned on a flagd flag via the browser UI at `localhost:8080/feature`. How do I turn it off?**
+
+Either toggle it off in the same UI, or run:
+
+```bash
+./scripts/toggle-flag.sh --status          # see what's on
+./scripts/toggle-flag.sh paymentFailure off  # turn off a specific flag
+./scripts/inject-failure.sh --reset-all    # turn off everything at once
+```
+
+The browser UI and the scripts both write to the same ConfigMap — they are interchangeable.
+
+---
+
+**Q: The demo website (`localhost:8080`) isn't loading or is behaving strangely. Where do I start?**
+
+First check whether a failure was left active:
+
+```bash
+./scripts/inject-failure.sh --check
+```
+
+If something is active, clear it:
+
+```bash
+./scripts/inject-failure.sh --reset-all
+```
+
+If the site is still broken after a reset, the port-forward may have dropped. Restart it:
+
+```bash
+./scripts/start-demo.sh
+```
+
+If pods are crashing, check overall cluster health:
+
+```bash
+kubectl get pods          # look for CrashLoopBackOff, Error, OOMKilled
+kubectl get deployments   # look for 0/1 READY
+```
+
+---
+
+**Q: What's the difference between `--revert` and `--reset-all`?**
+
+| Command | What it does |
+|---------|-------------|
+| `--revert` | Reverts the single scenario that was injected via `inject-failure.sh`, then reveals what it was. Won't touch flags set via the browser UI or `toggle-flag.sh` directly. |
+| `--reset-all` | Clears everything — the k8s state file AND every non-off flagd flag, regardless of how they were set. Use this when you're not sure what's active. |
+
+---
+
+**Q: I injected a scenario but I've forgotten which one. How do I find out?**
+
+```bash
+./scripts/inject-failure.sh --status   # vague symptom hint (safe to share with a participant)
+./scripts/inject-failure.sh --reveal   # full answer + root cause + Kibana path
+```
+
+---
+
+**Q: Can I inject a specific failure rather than a random one?**
+
+Yes. List the available scenarios and pick one by ID:
+
+```bash
+./scripts/inject-failure.sh --list
+./scripts/inject-failure.sh --scenario=chaos-net-loss-payment
+```
+
+---
+
+**Q: The demo was working yesterday but now `localhost:8080` is timing out. Nothing is shown as active.**
+
+The port-forward process dies when your laptop sleeps or the terminal is closed. Restart it:
+
+```bash
+./scripts/start-demo.sh
+```
+
+Check it's running:
+
+```bash
+./scripts/start-demo.sh --status
+```
+
+---
+
+**Q: How do I tell whether I'm looking at a flagd failure or a K8s infrastructure failure?**
+
+- **flagd failures** are application-layer — the pods are all Running/Ready, errors come from the app logic. Check with `./scripts/toggle-flag.sh --status`.
+- **K8s failures** affect infrastructure — pods may be in `CrashLoopBackOff`, `OOMKilled`, or scaled to 0. Check with `kubectl get pods` and `kubectl get deployments`.
+- Run `./scripts/inject-failure.sh --check` to see both at once.
+
+---
 
 ## Cluster Management
 

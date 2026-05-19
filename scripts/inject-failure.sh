@@ -1,26 +1,26 @@
 #!/usr/bin/env bash
 # inject-failure.sh — Randomly inject a failure scenario for "Capture the Bug" demo sessions.
 #
-# Draws from a unified pool of flagd (application-layer) and Chaos Mesh
+# Draws from a unified pool of flagd (application-layer) and k8s-fault
 # (infrastructure-layer) scenarios. The operator injects a random failure;
 # the participant investigates in Kibana.
 #
 # Usage:
 #   ./scripts/inject-failure.sh                             # Random injection (operator sees which)
 #   ./scripts/inject-failure.sh --quiet                     # Random injection, scenario hidden
-#   ./scripts/inject-failure.sh --chaos-only                # Random Chaos Mesh scenario only (no flagd)
+#   ./scripts/inject-failure.sh --infra-only                # Random infrastructure scenario only (no flagd)
 #   ./scripts/inject-failure.sh --scenario=payment-partial  # Inject a specific scenario by ID
 #   ./scripts/inject-failure.sh --preview                   # Preview a random scenario (no changes)
-#   ./scripts/inject-failure.sh --preview --chaos-only      # Preview a random Chaos Mesh scenario
+#   ./scripts/inject-failure.sh --preview --infra-only      # Preview a random infrastructure scenario
 #   ./scripts/inject-failure.sh --preview --scenario=<id>   # Preview a specific scenario
 #   ./scripts/inject-failure.sh --status                    # Show a vague symptom hint
 #   ./scripts/inject-failure.sh --reveal                    # Reveal the full scenario explanation
 #   ./scripts/inject-failure.sh --revert                    # Reset and reveal what was active
 #   ./scripts/inject-failure.sh --list                      # List all available scenarios
-#   ./scripts/inject-failure.sh --list --chaos-only         # List only Chaos Mesh scenarios
+#   ./scripts/inject-failure.sh --list --infra-only         # List only infrastructure scenarios
 #
-# Use --chaos-only when testing AI agents: flagd failures are well-documented in
-# the OpenTelemetry demo and may be known to the model. Chaos Mesh infrastructure
+# Use --infra-only when testing AI agents: flagd failures are well-documented in
+# the OpenTelemetry demo and may be known to the model. K8s-native infrastructure
 # faults are lower-level and less likely to be in training data.
 #
 # Scenarios excluded for GCP cost reasons (not in the random pool):
@@ -167,101 +167,113 @@ pipeline, not the order placement flow — which is why checkout appears to succ
 while downstream processing silently falls behind.|\
 APM → Services → accountingservice and frauddetectionservice — consumer lag metric and latency spike. Logs → filter to kafka consumer errors or slow processing messages"
 
-  # ── Chaos Mesh scenarios (infrastructure-layer) ───────────────────────────────
+  # ── K8s-native scenarios (infrastructure-layer) ───────────────────────────────
 
-  "chaos-net-delay-checkout|chaos-mesh|chaos-mesh/scenarios/ctb-network-delay-checkout.yaml|-|\
-Checkout is extremely slow. Users can still place orders but it takes much longer \
-than expected — the issue doesn't look like a normal application error.|\
-Checkout transactions complete but take 2+ seconds longer than normal. The p95 and \
-p99 latency on checkoutservice are sharply elevated. Error rates remain low — \
-requests are slow, not failing. Other services appear unaffected. The latency \
-increase is uniform across all checkout transactions with no correlation to user, \
-product, or time of day.|\
-Chaos Mesh is injecting a 2-second network delay with 500ms jitter at the kernel \
-network layer on the checkoutservice pod. Unlike an application-level slowdown, \
-this affects all network I/O to and from the pod — including health checks and \
-service-to-service calls. The pod is healthy and the application code is running \
-normally; only its network is throttled. This cannot be detected by inspecting \
-application logs or error rates — only latency metrics reveal the fault.|\
-APM → Services → checkoutservice → Latency tab — p95/p99 spike with low error rate. Compare with other services to confirm the fault is isolated to checkout"
+  "chaos-net-delay-checkout|k8s-fault|k8s-faults/scenarios/ctb-checkout-cpu-throttle|-|\
+Checkout is noticeably slower than usual. Users can still place orders but it \
+takes much longer than expected — no errors are visible, just elevated latency.|\
+Checkout transactions complete but take significantly longer than normal. The p95 \
+and p99 latency on the checkout service are sharply elevated. Error rates remain \
+low — requests are slow, not failing. Other services appear unaffected. The \
+latency increase is uniform across all checkout transactions. Infrastructure \
+metrics show the checkout pod is CPU-throttled; it is consuming its full CPU \
+allotment and the kernel is rate-limiting its execution time.|\
+A recent resource-governance deployment added a CPU limit of 2m to the checkout \
+service. The Go runtime under real load requires significantly more than 2m, \
+causing kernel-level CPU throttling. All checkout processing — including \
+downstream gRPC calls to cart, payment, and shipping — is serialised slowly. \
+The pod is Running and Ready, and application logs are clean. The fault is only \
+visible in infrastructure CPU metrics and APM latency data. Root cause: \
+kubectl get deployment checkout -o yaml shows cpu: 2m under resources.limits, \
+which should not be present.|\
+APM → Services → checkout → Latency tab — p95/p99 spike with low error rate. Infrastructure → Kubernetes → Pods → checkout pod — CPU throttling visible. kubectl top pod confirms CPU at limit"
 
-  "chaos-pod-fail-cart|chaos-mesh|chaos-mesh/scenarios/ctb-pod-failure-cart.yaml|-|\
-The cart service appears to be completely unavailable. Users cannot add items or \
-proceed to checkout.|\
-The cart service is completely unreachable. Unlike the flagd cartFailure scenario \
-where the pod is healthy but returns application-layer gRPC errors, here all network \
-traffic to the cart pod is dropped. Dependent services receive connection timeouts \
-rather than error responses — traces show requests hanging until they time out \
-rather than failing fast. The cart pod itself stays healthy and Ready; the fault \
-is at the network layer.|\
-Chaos Mesh is injecting 100% packet loss on the cartservice pod using NetworkChaos. \
-GKE Autopilot does not grant the device cgroup access that Chaos Mesh pod-failure \
-requires, so network-level isolation is used instead — the effect is equivalent. \
-Key diagnostic difference from flagd cart-errors: APM traces show connection \
-timeouts not gRPC error codes, and the cart pod shows as Ready in Infrastructure.|\
-APM → Services → cartservice — connection timeout errors. APM → Service Map — broken edges from checkout and frontend to cart. Compare trace error type to flagd cart-errors: timeout vs gRPC error response"
+  "chaos-pod-fail-cart|k8s-fault|k8s-faults/scenarios/ctb-cart-bad-redis|-|\
+The cart service is broken — users cannot add items, view their cart, or \
+proceed to checkout. The cart pod looks healthy.|\
+Cart is completely unavailable. The cart pod is in CrashLoopBackOff — it \
+starts, crashes immediately with a Redis connection error, and loops. \
+kubectl logs on the cart pod shows the app crashing on startup: \
+'Wasn't able to connect to redis'. The fault is not in the network or \
+a NetworkPolicy — it is a misconfigured environment variable.|\
+A cache-migration PR updated the VALKEY_ADDR environment variable to \
+valkey-cart-broken:6379 — pointing the cart service at a Redis hostname that \
+does not exist. The cart app (a .NET service) validates its Redis connection \
+at startup and exits with a fatal error if the connection fails. The pod \
+enters CrashLoopBackOff. The init container still passes (it checks the real \
+valkey-cart service, not VALKEY_ADDR) so the misconfiguration is subtle. \
+Root cause: kubectl get deployment cart -o yaml shows \
+VALKEY_ADDR=valkey-cart-broken:6379 under env. kubectl logs on the \
+cart pod shows the startup crash.|\
+kubectl get pods — cart pod in CrashLoopBackOff. kubectl logs cart — fatal startup error: Wasn't able to connect to redis. kubectl describe deployment cart — VALKEY_ADDR=valkey-cart-broken:6379. APM → Services → cart — no recent throughput. Infrastructure → Kubernetes → Pods — cart pod shows Error/CrashLoopBackOff"
 
-  "chaos-cpu-stress-frontend|chaos-mesh|chaos-mesh/scenarios/ctb-cpu-stress-frontend.yaml|-|\
+  "chaos-cpu-stress-frontend|k8s-fault|k8s-faults/scenarios/ctb-frontend-cpu-throttle|-|\
 The frontend is noticeably slower than usual. Everything is technically working \
-but response times are up across the board. The issue seems to be at the \
-infrastructure level rather than in the application code.|\
+but response times are up across the board.|\
 All frontend transactions show elevated latency — not a single slow endpoint but \
-everything is slower uniformly. Error rates are not elevated. CPU utilisation on \
+everything is uniformly slower. Error rates are not elevated. CPU utilisation on \
 the frontend pod is abnormally high. The latency increase correlates with the CPU \
-spike. No application errors are logged — the service is resource-starved, not broken.|\
-Chaos Mesh is running 2 CPU stress workers at 80% load on the frontend pod at the \
-OS level, consuming CPU cycles that would otherwise serve HTTP requests. The Go \
-HTTP server has fewer resources available, causing across-the-board latency \
-increases. There are no application errors because the code is functioning \
-correctly — it is simply waiting for CPU time. The fault is invisible to application \
-logs and only visible in infrastructure metrics.|\
-Infrastructure → Kubernetes → Pods — frontend pod CPU spike. APM → Services → frontend → Transactions — all transactions show increased latency (not isolated to one endpoint)"
+spike. No application errors are logged — the service is resource-constrained, \
+not broken.|\
+A resource governance PR added a CPU limit of 5m to the frontend deployment. \
+The frontend handles all load-generator traffic and requires far more than 5m, \
+causing kernel-level CPU throttling under normal load. The Node.js HTTP server \
+has fewer CPU cycles available, causing across-the-board latency increases with \
+no application-layer errors. Root cause: kubectl get deployment frontend -o yaml \
+shows cpu: 5m under resources.limits, which should not be present.|\
+Infrastructure → Kubernetes → Pods → frontend pod — CPU at limit. APM → Services → frontend → Transactions — all endpoints show increased latency (not isolated to one). kubectl top pod confirms CPU throttling"
 
-  "chaos-net-loss-payment|chaos-mesh|chaos-mesh/scenarios/ctb-network-loss-payment.yaml|-|\
-Payment is failing intermittently and inconsistently. Sometimes it works, sometimes \
-it doesn't — and the pattern doesn't seem related to any specific user or product.|\
-Payment errors are intermittent with no consistent pattern — sometimes checkout \
-succeeds, sometimes it fails, with no correlation to user, product, or time. Traces \
-show TCP-level connection failures or timeouts rather than clean application error \
-responses. The error signature differs from the flagd paymentFailure scenario: \
-instead of a clear error message from the payment service, traces show retries, \
-timeouts, or abrupt connection closes.|\
-Chaos Mesh is dropping 50% of network packets with 25% correlation to and from \
-the paymentservice pod at the kernel network layer. Unlike the flagd paymentFailure \
-flag (which returns a deliberate error from application code), this fault causes \
-TCP connections to degrade — packets are silently dropped and the connection times \
-out or retries. This is harder to diagnose because there is no error message from \
-the payment service itself; the failure manifests as a network timeout upstream.|\
-APM → Services → paymentservice — intermittent errors with inconsistent messages (timeouts vs errors). Compare trace error type to flagd payment failures: TCP timeout vs application error response is the key diagnostic difference"
+  "chaos-net-loss-payment|k8s-fault|k8s-faults/scenarios/ctb-payment-oom-restart|-|\
+Payment is failing intermittently and inconsistently. Sometimes checkout \
+completes, sometimes it doesn't — with no obvious pattern.|\
+Payment errors are intermittent with no consistent pattern. Unlike the flagd \
+paymentFailure scenario (which returns a clean error response on exactly 50% of \
+calls), here failures are bursty — many succeed in a row, then a window of \
+failures, then recovery. kubectl get pods shows the payment pod has an elevated \
+RESTARTS count. During each restart window, in-flight payment requests fail. \
+Between restarts the service is healthy.|\
+A memory-audit PR set the payment service memory limit to 25Mi. The Node.js \
+runtime alone requires more than this — the pod starts, immediately exhausts \
+its memory allowance, and is OOMKilled by the kernel. Kubernetes restarts it \
+(CrashLoopBackOff backoff grows over time). During each restart window payment \
+calls fail; between restarts they succeed. Root cause: kubectl describe pod \
+<payment-pod> shows Last State: OOMKilled under Last State and the memory limit \
+under Limits. kubectl get events shows OOMKilling events.|\
+kubectl get pods — payment pod RESTARTS count is elevated. kubectl describe pod <payment-pod> — Last State OOMKilled, Limits memory 25Mi. APM → Services → payment — bursty intermittent errors coinciding with pod restarts"
 
-  "chaos-pod-fail-recommendation|chaos-mesh|chaos-mesh/scenarios/ctb-pod-failure-recommendation.yaml|-|\
-Product recommendations have stopped appearing on product pages. Everything else \
-on the site seems fine.|\
-Product recommendation widgets are absent from product pages. The frontend degrades \
-gracefully — no hard error is shown, recommendations simply do not appear. APM \
-traces show calls to the recommendation service timing out rather than returning \
-errors. The recommendation pod itself is healthy and Ready in Kubernetes; the fault \
-is at the network layer causing the frontend to time out waiting for a response.|\
-Chaos Mesh is injecting a 10-second network delay on the recommendationservice pod. \
-GKE Autopilot does not grant the device cgroup access that Chaos Mesh pod-failure \
-requires, so a high-latency network delay is used instead — the frontend times out \
-waiting for recommendations and falls back to showing none. Key diagnostic \
-difference from a pod failure: the recommendation pod shows as Ready in \
-Infrastructure, but APM traces show high latency and timeouts rather than \
-connection refused errors.|\
-APM → Service Map — frontend to recommendationservice edge showing high latency or timeouts. APM → Services → frontend — traces show recommendation calls timing out. Infrastructure → Kubernetes → Pods — recommendation pod shows Ready (distinguishes this from a real pod failure)"
+  "chaos-pod-fail-recommendation|k8s-fault|k8s-faults/scenarios/ctb-recommendation-scaled-zero|-|\
+Product pages are completely broken — they time out and never load. The \
+recommendation service has no running pods.|\
+Product pages hang and timeout. APM traces show the frontend waiting \
+indefinitely on a gRPC call to the recommendation service before the request \
+times out. The recommendation deployment exists but has 0 replicas — \
+kubectl get deployment recommendation shows READY 0/0 and no pods are listed \
+for the recommendation selector. The timeout cascades: since the frontend \
+waits for recommendations before rendering the page, every product page \
+request stalls for the full gRPC timeout duration.|\
+An auto-scaling cost-review script evaluated recommendation as idle (low \
+traffic during a maintenance window) and set its replica count to 0. The \
+change was applied via a GitOps PR that was approved without noticing the \
+replica count was being zeroed rather than reduced. Root cause: \
+kubectl get deployment recommendation shows replicas: 0. \
+kubectl get pods -l app.kubernetes.io/component=recommendation returns \
+no resources — there is nothing to serve traffic.|\
+kubectl get deployment recommendation — READY 0/0, replicas 0. kubectl get pods -l app.kubernetes.io/component=recommendation — no resources found. APM → Service Map — frontend to recommendation edge shows timeouts/errors. APM → Services → recommendation — no recent throughput"
 
 )
 
 # ── Helper: filter scenario pool by type ─────────────────────────────────────
 # Returns a new array (by printing entries) filtered to the given type.
-# Usage: pool=(); while IFS= read -r s; do pool+=("$s"); done < <(filter_scenarios "chaos-mesh")
+# Pass "infra" to match both "chaos-mesh" and "k8s-fault" types.
+# Usage: pool=(); while IFS= read -r s; do pool+=("$s"); done < <(filter_scenarios "k8s-fault")
 filter_scenarios() {
   local filter_type="$1"
   for scenario in "${SCENARIOS[@]}"; do
     local type
     type=$(scenario_field "$scenario" 2)
-    if [[ "$type" == "$filter_type" ]]; then
+    if [[ "$filter_type" == "infra" ]]; then
+      [[ "$type" == "chaos-mesh" || "$type" == "k8s-fault" ]] && echo "$scenario"
+    elif [[ "$type" == "$filter_type" ]]; then
       echo "$scenario"
     fi
   done
@@ -370,6 +382,27 @@ revert_chaos() {
     kubectl delete -f - --ignore-not-found &>/dev/null
 }
 
+# ── Helper: apply a K8s-native fault scenario ─────────────────────────────────
+apply_k8s_fault() {
+  local fault_dir_rel="$1"
+  local inject_script="${REPO_ROOT}/${fault_dir_rel}/inject.sh"
+
+  [[ -f "$inject_script" ]] || die "inject.sh not found: ${inject_script}"
+  command -v kubectl &>/dev/null || die "'kubectl' is required but not installed."
+
+  NAMESPACE="$NAMESPACE" bash "$inject_script" &>/dev/null
+}
+
+# ── Helper: revert a K8s-native fault scenario ────────────────────────────────
+revert_k8s_fault() {
+  local fault_dir_rel="$1"
+  local revert_script="${REPO_ROOT}/${fault_dir_rel}/revert.sh"
+
+  [[ -f "$revert_script" ]] || { warn "revert.sh not found: ${revert_script} — may already be reverted."; return 0; }
+
+  NAMESPACE="$NAMESPACE" bash "$revert_script" &>/dev/null
+}
+
 # ── Helper: print a formatted scenario reveal ─────────────────────────────────
 print_reveal() {
   local scenario_id="$1"
@@ -385,7 +418,11 @@ print_reveal() {
   kibana_path=$(scenario_field "$scenario" 8)
 
   local type_label
-  [[ "$type" == "flagd" ]] && type_label="flagd (application)" || type_label="Chaos Mesh (infrastructure)"
+  case "$type" in
+    flagd)      type_label="flagd (application)" ;;
+    k8s-fault)  type_label="K8s native (infrastructure)" ;;
+    *)          type_label="Chaos Mesh (infrastructure)" ;;
+  esac
 
   blank
   echo -e "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -394,6 +431,8 @@ print_reveal() {
   blank
   if [[ "$type" == "flagd" ]]; then
     echo -e "  ${BOLD}Flag:${NC}     ${target} = ${variant}"
+  elif [[ "$type" == "k8s-fault" ]]; then
+    echo -e "  ${BOLD}Fault dir:${NC} ${target}"
   else
     echo -e "  ${BOLD}Manifest:${NC} ${target}"
   fi
@@ -413,16 +452,16 @@ print_reveal() {
 
 # ── Command: --list ────────────────────────────────────────────────────────────
 cmd_list() {
-  local chaos_only=false
+  local infra_only=false
   for arg in "$@"; do
-    [[ "$arg" == "--chaos-only" ]] && chaos_only=true
+    [[ "$arg" == "--infra-only" ]] && infra_only=true
   done
 
   local -a pool
-  if [[ "$chaos_only" == true ]]; then
-    pool=(); while IFS= read -r s; do pool+=("$s"); done < <(filter_scenarios "chaos-mesh")
+  if [[ "$infra_only" == true ]]; then
+    pool=(); while IFS= read -r s; do pool+=("$s"); done < <(filter_scenarios "infra")
     blank
-    echo -e "${BOLD}Chaos Mesh scenarios (infrastructure-layer):${NC}"
+    echo -e "${BOLD}Infrastructure scenarios (K8s-native):${NC}"
   else
     pool=("${SCENARIOS[@]}")
     blank
@@ -430,8 +469,8 @@ cmd_list() {
   fi
 
   blank
-  printf "  ${BOLD}%-38s %-14s %-14s${NC}\n" "SCENARIO ID" "TYPE" "TARGET"
-  printf "  ${DIM}%-38s %-14s %-14s${NC}\n" "─────────────────────────────────────" "─────────────" "─────────────"
+  printf "  ${BOLD}%-38s %-22s %-14s${NC}\n" "SCENARIO ID" "TYPE" "TARGET"
+  printf "  ${DIM}%-38s %-22s %-14s${NC}\n" "─────────────────────────────────────" "─────────────────────" "─────────────"
   for scenario in "${pool[@]}"; do
     local id type target variant
     id=$(scenario_field "$scenario" 1)
@@ -439,11 +478,15 @@ cmd_list() {
     target=$(scenario_field "$scenario" 3)
     variant=$(scenario_field "$scenario" 4)
     if [[ "$type" == "flagd" ]]; then
-      printf "  %-38s %-14s %s = %s\n" "$id" "flagd" "$target" "$variant"
+      printf "  %-38s %-22s %s = %s\n" "$id" "flagd" "$target" "$variant"
+    elif [[ "$type" == "k8s-fault" ]]; then
+      local fault_name
+      fault_name=$(basename "$target")
+      printf "  %-38s %-22s %s\n" "$id" "k8s-native" "$fault_name"
     else
       local manifest_name
       manifest_name=$(basename "$target" .yaml)
-      printf "  %-38s %-14s %s\n" "$id" "chaos-mesh" "$manifest_name"
+      printf "  %-38s %-22s %s\n" "$id" "chaos-mesh" "$manifest_name"
     fi
   done
   blank
@@ -471,7 +514,11 @@ cmd_status() {
   hint=$(scenario_field "$scenario" 5)
 
   local type_label
-  [[ "$type" == "flagd" ]] && type_label="flagd (application)" || type_label="Chaos Mesh (infrastructure)"
+  case "$type" in
+    flagd)      type_label="flagd (application)" ;;
+    k8s-fault)  type_label="K8s native (infrastructure)" ;;
+    *)          type_label="Chaos Mesh (infrastructure)" ;;
+  esac
 
   blank
   echo -e "${BOLD}${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -525,6 +572,11 @@ cmd_revert() {
     flag=$(grep '^flag=' "$STATE_FILE" | cut -d= -f2)
     apply_flag "$flag" "off"
     success "Flag '${flag}' reset to 'off'"
+  elif [[ "$type" == "k8s-fault" ]]; then
+    local fault_dir
+    fault_dir=$(grep '^fault_dir=' "$STATE_FILE" | cut -d= -f2-)
+    revert_k8s_fault "$fault_dir"
+    success "K8s fault reverted"
   else
     local manifest
     manifest=$(grep '^manifest=' "$STATE_FILE" | cut -d= -f2-)
@@ -539,14 +591,149 @@ cmd_revert() {
   blank
 }
 
+# ── Command: --check ──────────────────────────────────────────────────────────
+# Shows the full picture: k8s state file AND live flagd flag variants.
+cmd_check() {
+  local any_active=false
+
+  blank
+  echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+  echo -e "${BOLD}  Failure scenario health check${NC}"
+  echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+  blank
+
+  # ── K8s-native / Chaos Mesh state file ────────────────────────────────────
+  echo -e "  ${BOLD}K8s scenario (state file):${NC}"
+  if [[ -f "$STATE_FILE" ]]; then
+    local scenario_id type injected_at
+    scenario_id=$(grep '^scenario=' "$STATE_FILE" | cut -d= -f2)
+    type=$(grep '^type='     "$STATE_FILE" | cut -d= -f2)
+    injected_at=$(grep '^injected_at=' "$STATE_FILE" | cut -d= -f2-)
+    echo -e "    ${RED}ACTIVE${NC}  ${BOLD}${scenario_id}${NC} [${type}]  injected ${injected_at}"
+    any_active=true
+  else
+    echo -e "    ${GREEN}clean${NC}  no active scenario"
+  fi
+  blank
+
+  # ── flagd live flags ───────────────────────────────────────────────────────
+  echo -e "  ${BOLD}flagd flags (live configmap):${NC}"
+  local active_flags
+  active_flags=$(kubectl get configmap flagd-config -n "$NAMESPACE" -o json 2>/dev/null \
+    | python3 -c "
+import sys, json
+try:
+    flags = json.loads(list(json.load(sys.stdin)['data'].values())[0])['flags']
+    active = [(k, v['defaultVariant']) for k, v in sorted(flags.items()) if v['defaultVariant'] != 'off']
+    for k, v in active:
+        print(f'{k}={v}')
+except Exception as e:
+    pass
+" 2>/dev/null)
+
+  if [[ -n "$active_flags" ]]; then
+    while IFS='=' read -r flag variant; do
+      echo -e "    ${RED}ACTIVE${NC}  ${BOLD}${flag}${NC} = ${variant}"
+      any_active=true
+    done <<< "$active_flags"
+  else
+    echo -e "    ${GREEN}clean${NC}  all flags off"
+  fi
+  blank
+
+  # ── Summary ───────────────────────────────────────────────────────────────
+  if [[ "$any_active" == true ]]; then
+    echo -e "  ${RED}Something is active.${NC} Run ${BOLD}--reset-all${NC} to clear everything."
+  else
+    echo -e "  ${GREEN}All clear.${NC} No failures active."
+  fi
+  echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+  blank
+}
+
+# ── Command: --reset-all ──────────────────────────────────────────────────────
+# Reverts any active k8s fault AND resets every non-off flagd flag to off.
+cmd_reset_all() {
+  blank
+  echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+  echo -e "${BOLD}  Reset all — clearing every active failure${NC}"
+  echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+  blank
+
+  local did_something=false
+
+  # ── Revert k8s state file if present ──────────────────────────────────────
+  if [[ -f "$STATE_FILE" ]]; then
+    local scenario_id type
+    scenario_id=$(grep '^scenario=' "$STATE_FILE" | cut -d= -f2)
+    type=$(grep '^type='     "$STATE_FILE" | cut -d= -f2)
+    info "Reverting k8s scenario '${scenario_id}'..."
+    if [[ "$type" == "flagd" ]]; then
+      local flag
+      flag=$(grep '^flag=' "$STATE_FILE" | cut -d= -f2)
+      apply_flag "$flag" "off"
+    elif [[ "$type" == "k8s-fault" ]]; then
+      local fault_dir
+      fault_dir=$(grep '^fault_dir=' "$STATE_FILE" | cut -d= -f2-)
+      revert_k8s_fault "$fault_dir"
+    else
+      local manifest
+      manifest=$(grep '^manifest=' "$STATE_FILE" | cut -d= -f2-)
+      revert_chaos "$manifest"
+    fi
+    rm -f "$STATE_FILE"
+    success "K8s scenario '${scenario_id}' reverted"
+    did_something=true
+  else
+    echo -e "  ${DIM}K8s state file: nothing to revert${NC}"
+  fi
+
+  blank
+
+  # ── Reset all non-off flagd flags ─────────────────────────────────────────
+  info "Checking flagd flags..."
+  local active_flags
+  active_flags=$(kubectl get configmap flagd-config -n "$NAMESPACE" -o json 2>/dev/null \
+    | python3 -c "
+import sys, json
+try:
+    flags = json.loads(list(json.load(sys.stdin)['data'].values())[0])['flags']
+    active = [(k, v['defaultVariant']) for k, v in flags.items() if v['defaultVariant'] != 'off']
+    for k, v in active:
+        print(f'{k}')
+except Exception:
+    pass
+" 2>/dev/null)
+
+  if [[ -n "$active_flags" ]]; then
+    while IFS= read -r flag; do
+      info "Resetting flag '${flag}' → off"
+      apply_flag "$flag" "off"
+      success "Flag '${flag}' reset to off"
+      did_something=true
+    done <<< "$active_flags"
+  else
+    echo -e "  ${DIM}flagd flags: all already off${NC}"
+  fi
+
+  blank
+  if [[ "$did_something" == true ]]; then
+    echo -e "  ${GREEN}All failures cleared. Demo is running clean.${NC}"
+  else
+    echo -e "  ${GREEN}Already clean — nothing to reset.${NC}"
+  fi
+  echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+  blank
+}
+
 # ── Command: --preview ────────────────────────────────────────────────────────
 cmd_preview() {
   local specific_scenario=""
-  local chaos_only=false
+  local infra_only=false
   for arg in "$@"; do
     case "$arg" in
       --scenario=*)  specific_scenario="${arg#*=}" ;;
-      --chaos-only)  chaos_only=true ;;
+      --infra-only)  infra_only=true ;;
     esac
   done
 
@@ -556,9 +743,9 @@ cmd_preview() {
       die "Unknown scenario '${specific_scenario}'. Run --list to see available scenarios."
   else
     local -a pool
-    if [[ "$chaos_only" == true ]]; then
-      pool=(); while IFS= read -r s; do pool+=("$s"); done < <(filter_scenarios "chaos-mesh")
-      (( ${#pool[@]} == 0 )) && die "No Chaos Mesh scenarios found."
+    if [[ "$infra_only" == true ]]; then
+      pool=(); while IFS= read -r s; do pool+=("$s"); done < <(filter_scenarios "infra")
+      (( ${#pool[@]} == 0 )) && die "No infrastructure scenarios found."
     else
       pool=("${SCENARIOS[@]}")
     fi
@@ -580,6 +767,9 @@ cmd_preview() {
   if [[ "$type" == "flagd" ]]; then
     type_label="flagd (application)"
     target_display="${target} = ${variant}"
+  elif [[ "$type" == "k8s-fault" ]]; then
+    type_label="K8s native (infrastructure)"
+    target_display="$(basename "$target")"
   else
     type_label="Chaos Mesh (infrastructure)"
     target_display="$(basename "$target" .yaml)"
@@ -626,13 +816,13 @@ cmd_preview() {
 # ── Command: inject (default) ─────────────────────────────────────────────────
 cmd_inject() {
   local quiet=false
-  local chaos_only=false
+  local infra_only=false
   local specific_scenario=""
 
   for arg in "$@"; do
     case "$arg" in
       --quiet)       quiet=true ;;
-      --chaos-only)  chaos_only=true ;;
+      --infra-only)  infra_only=true ;;
       --scenario=*)  specific_scenario="${arg#*=}" ;;
     esac
   done
@@ -659,6 +849,10 @@ cmd_inject() {
       local old_flag
       old_flag=$(grep '^flag=' "$STATE_FILE" | cut -d= -f2)
       apply_flag "$old_flag" "off"
+    elif [[ "$active_type" == "k8s-fault" ]]; then
+      local old_fault_dir
+      old_fault_dir=$(grep '^fault_dir=' "$STATE_FILE" | cut -d= -f2-)
+      revert_k8s_fault "$old_fault_dir"
     else
       local old_manifest
       old_manifest=$(grep '^manifest=' "$STATE_FILE" | cut -d= -f2-)
@@ -675,9 +869,9 @@ cmd_inject() {
       die "Unknown scenario '${specific_scenario}'. Run --list to see available scenarios."
   else
     local -a pool
-    if [[ "$chaos_only" == true ]]; then
-      pool=(); while IFS= read -r s; do pool+=("$s"); done < <(filter_scenarios "chaos-mesh")
-      (( ${#pool[@]} == 0 )) && die "No Chaos Mesh scenarios found."
+    if [[ "$infra_only" == true ]]; then
+      pool=(); while IFS= read -r s; do pool+=("$s"); done < <(filter_scenarios "infra")
+      (( ${#pool[@]} == 0 )) && die "No infrastructure scenarios found."
     else
       pool=("${SCENARIOS[@]}")
     fi
@@ -697,12 +891,19 @@ cmd_inject() {
 
   if [[ "$type" == "flagd" ]]; then
     apply_flag "$target" "$variant"
-    # Write state file
     cat > "$STATE_FILE" <<EOF
 type=flagd
 scenario=${scenario_id}
 flag=${target}
 variant=${variant}
+injected_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+EOF
+  elif [[ "$type" == "k8s-fault" ]]; then
+    apply_k8s_fault "$target"
+    cat > "$STATE_FILE" <<EOF
+type=k8s-fault
+scenario=${scenario_id}
+fault_dir=${target}
 injected_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 EOF
   else
@@ -719,7 +920,11 @@ EOF
   blank
 
   local type_label
-  [[ "$type" == "flagd" ]] && type_label="flagd (application)" || type_label="Chaos Mesh (infrastructure)"
+  case "$type" in
+    flagd)      type_label="flagd (application)" ;;
+    k8s-fault)  type_label="K8s native (infrastructure)" ;;
+    *)          type_label="Chaos Mesh (infrastructure)" ;;
+  esac
 
   if [[ "$quiet" == true ]]; then
     echo -e "  ${DIM}Running in quiet mode — scenario hidden.${NC}"
@@ -731,6 +936,8 @@ EOF
     blank
     if [[ "$type" == "flagd" ]]; then
       echo -e "  ${BOLD}Flag set:${NC}   ${target} = ${variant}"
+    elif [[ "$type" == "k8s-fault" ]]; then
+      echo -e "  ${BOLD}Fault:${NC}      $(basename "$target")"
     else
       echo -e "  ${BOLD}Manifest:${NC}   $(basename "$target" .yaml)"
     fi
@@ -757,10 +964,12 @@ MODE="${1:-inject}"
 case "$MODE" in
   --list)               cmd_list "${@:2}" ;;
   --status)             cmd_status ;;
+  --check)              cmd_check ;;
+  --reset-all)          cmd_reset_all ;;
   --reveal)             cmd_reveal ;;
   --revert)             cmd_revert ;;
   --preview)            cmd_preview "${@:2}" ;;
-  --quiet | --chaos-only | --scenario=*) cmd_inject "$@" ;;
+  --quiet | --infra-only | --scenario=*) cmd_inject "$@" ;;
   inject)               cmd_inject ;;
   --help|-h)
     blank
@@ -768,20 +977,22 @@ case "$MODE" in
     blank
     echo "  (no args)                            Inject a random failure (operator sees which one)"
     echo "  --quiet                              Inject without revealing the scenario"
-    echo "  --chaos-only                         Random Chaos Mesh scenario only (excludes flagd)"
-    echo "  --quiet --chaos-only                 Quiet + Chaos Mesh only"
+    echo "  --infra-only                         Random infrastructure scenario only (excludes flagd)"
+    echo "  --quiet --infra-only                 Quiet + infrastructure only"
     echo "  --scenario=<id>                      Inject a specific scenario by ID"
     echo "  --preview                            Preview a random scenario without triggering it"
-    echo "  --preview --chaos-only               Preview a random Chaos Mesh scenario"
+    echo "  --preview --infra-only               Preview a random infrastructure scenario"
     echo "  --preview --scenario=<id>            Preview a specific scenario without triggering it"
-    echo "  --status                             Show a hint about the active failure"
-    echo "  --reveal                             Reveal the full scenario explanation"
-    echo "  --revert                             Reset flags/chaos, clear state, reveal what was active"
-    echo "  --list                               List all available scenarios"
-    echo "  --list --chaos-only                  List only Chaos Mesh scenarios"
+  echo "  --status                             Show a hint about the active failure"
+  echo "  --check                              Show full health: k8s state + all live flagd flags"
+  echo "  --reset-all                          Clear everything — revert k8s fault + reset all flagd flags to off"
+  echo "  --reveal                             Reveal the full scenario explanation"
+  echo "  --revert                             Reset flags/k8s faults, clear state, reveal what was active"
+  echo "  --list                               List all available scenarios"
+  echo "  --list --infra-only                  List only infrastructure scenarios"
     blank
-    echo -e "  ${DIM}Use --chaos-only when testing AI agents: flagd failures are well-documented${NC}"
-    echo -e "  ${DIM}in the OTel demo and may be known to the model. Chaos Mesh faults are not.${NC}"
+    echo -e "  ${DIM}Use --infra-only when testing AI agents: flagd failures are well-documented${NC}"
+    echo -e "  ${DIM}in the OTel demo and may be known to the model. K8s-native faults are not.${NC}"
     blank
     ;;
   *)

@@ -60,10 +60,36 @@ for arg in "$@"; do
   esac
 done
 
+# ── --status: show all flags and their current variant ────────────────────────
+if [[ "$FLAG_NAME" == "--status" ]]; then
+  CONFIGMAP_NAME="${RELEASE_NAME:+${RELEASE_NAME}-}flagd-config"
+  info "Reading flagd flag state from ConfigMap '$CONFIGMAP_NAME' in namespace '$NAMESPACE'..."
+  echo ""
+  kubectl get configmap "$CONFIGMAP_NAME" -n "$NAMESPACE" -o json \
+    | python3 -c "
+import sys, json
+flags = json.loads(list(json.load(sys.stdin)['data'].values())[0])['flags']
+active = [(k, v['defaultVariant']) for k, v in sorted(flags.items()) if v['defaultVariant'] != 'off']
+inactive = [(k, v['defaultVariant']) for k, v in sorted(flags.items()) if v['defaultVariant'] == 'off']
+if active:
+    print('  \033[0;31mACTIVE (non-off):\033[0m')
+    for k, v in active:
+        print(f'    {k} = {v}')
+    print()
+print('  \033[2mInactive (off):\033[0m')
+for k, v in inactive:
+    print(f'    \033[2m{k}\033[0m')
+"
+  echo ""
+  exit 0
+fi
+
 if [[ -z "$FLAG_NAME" || -z "$STATE" ]]; then
   echo "Usage: $0 <flag-name> <on|off> [namespace] [release-name] [--variant=<variant>]"
+  echo "       $0 --status [namespace]"
   echo ""
   echo "Examples:"
+  echo "  $0 --status"
   echo "  $0 paymentFailure on"
   echo "  $0 paymentFailure on otel-demo my-otel-demo --variant='50%'"
   echo "  $0 cartFailure off"

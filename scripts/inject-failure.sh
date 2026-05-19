@@ -187,19 +187,19 @@ APM → Services → checkoutservice → Latency tab — p95/p99 spike with low 
 
   "chaos-pod-fail-cart|chaos-mesh|chaos-mesh/scenarios/ctb-pod-failure-cart.yaml|-|\
 The cart service appears to be completely unavailable. Users cannot add items or \
-proceed to checkout — the pod itself seems unhealthy.|\
-The cart service is completely unavailable. Unlike the flagd cartFailure scenario \
-where the pod is healthy but returns application errors, here the pod itself is \
-NotReady — Kubernetes has stopped routing traffic to it. Dependent services receive \
-connection refused errors rather than application-level error responses. The error \
-signature in APM traces is a transport-level failure, not a gRPC error code.|\
-Chaos Mesh has injected a pod-failure fault on the cart pod, forcing all containers \
-into a failed state at the container runtime level. Kubernetes marks the pod as \
-unhealthy and stops routing traffic to it. The application is not running — no code \
-is executing. This is an infrastructure fault, not a code fault. Kibana Infrastructure \
-will show the pod as NotReady; APM will show connection errors from services that \
-depend on cart.|\
-Infrastructure → Kubernetes → Pods — cart pod NotReady status. APM → Services → cartservice — connection errors (not gRPC errors). APM → Service Map — broken edges from checkout and frontend to cart"
+proceed to checkout.|\
+The cart service is completely unreachable. Unlike the flagd cartFailure scenario \
+where the pod is healthy but returns application-layer gRPC errors, here all network \
+traffic to the cart pod is dropped. Dependent services receive connection timeouts \
+rather than error responses — traces show requests hanging until they time out \
+rather than failing fast. The cart pod itself stays healthy and Ready; the fault \
+is at the network layer.|\
+Chaos Mesh is injecting 100% packet loss on the cartservice pod using NetworkChaos. \
+GKE Autopilot does not grant the device cgroup access that Chaos Mesh pod-failure \
+requires, so network-level isolation is used instead — the effect is equivalent. \
+Key diagnostic difference from flagd cart-errors: APM traces show connection \
+timeouts not gRPC error codes, and the cart pod shows as Ready in Infrastructure.|\
+APM → Services → cartservice — connection timeout errors. APM → Service Map — broken edges from checkout and frontend to cart. Compare trace error type to flagd cart-errors: timeout vs gRPC error response"
 
   "chaos-cpu-stress-frontend|chaos-mesh|chaos-mesh/scenarios/ctb-cpu-stress-frontend.yaml|-|\
 The frontend is noticeably slower than usual. Everything is technically working \
@@ -237,18 +237,19 @@ APM → Services → paymentservice — intermittent errors with inconsistent me
   "chaos-pod-fail-recommendation|chaos-mesh|chaos-mesh/scenarios/ctb-pod-failure-recommendation.yaml|-|\
 Product recommendations have stopped appearing on product pages. Everything else \
 on the site seems fine.|\
-Product recommendation widgets are absent from product pages. The rest of the \
-storefront functions normally — the frontend handles the missing service gracefully \
-with a fallback. The recommendation pod shows as NotReady in Kubernetes. Dependent \
-calls in APM traces show connection errors to recommendationservice rather than \
-application-level errors.|\
-Chaos Mesh has forced the recommendationservice pod into a failure state at the \
-container runtime level. The pod is not running — no application code is executing. \
-The frontend is designed to degrade gracefully when recommendations are unavailable, \
-so users see missing widgets rather than hard errors. This fault is only clearly \
-visible at the infrastructure layer (pod health) and in APM trace edges to the \
-recommendation service.|\
-Infrastructure → Kubernetes → Pods — recommendationservice pod NotReady. APM → Service Map — broken edge from frontend to recommendationservice. APM → Services → frontend — traces show connection errors on recommendation calls"
+Product recommendation widgets are absent from product pages. The frontend degrades \
+gracefully — no hard error is shown, recommendations simply do not appear. APM \
+traces show calls to the recommendation service timing out rather than returning \
+errors. The recommendation pod itself is healthy and Ready in Kubernetes; the fault \
+is at the network layer causing the frontend to time out waiting for a response.|\
+Chaos Mesh is injecting a 10-second network delay on the recommendationservice pod. \
+GKE Autopilot does not grant the device cgroup access that Chaos Mesh pod-failure \
+requires, so a high-latency network delay is used instead — the frontend times out \
+waiting for recommendations and falls back to showing none. Key diagnostic \
+difference from a pod failure: the recommendation pod shows as Ready in \
+Infrastructure, but APM traces show high latency and timeouts rather than \
+connection refused errors.|\
+APM → Service Map — frontend to recommendationservice edge showing high latency or timeouts. APM → Services → frontend — traces show recommendation calls timing out. Infrastructure → Kubernetes → Pods — recommendation pod shows Ready (distinguishes this from a real pod failure)"
 
 )
 

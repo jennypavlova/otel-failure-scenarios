@@ -1,19 +1,25 @@
 ---
-# Capture the Bug scenario: force the recommendationservice pod into a failure state.
-# The pod is marked unavailable — the product recommendation feature stops working
-# and APM shows connection errors from the frontend to the recommendation service.
+# Capture the Bug scenario: inject a 10-second network delay on the
+# recommendationservice pod. The frontend times out waiting for recommendations
+# and falls back gracefully — recommendation widgets stop appearing.
+# Note: pod-failure is not used here because GKE Autopilot restricts the device
+# cgroup access that Chaos Mesh requires for that action. A high-latency delay
+# causes the frontend to time out, producing the same observable symptom.
 # Duration: 30 minutes (auto-reverts; delete the resource to clean up the CRD).
 apiVersion: chaos-mesh.org/v1alpha1
-kind: PodChaos
+kind: NetworkChaos
 metadata:
   name: ctb-pod-failure-recommendation
   namespace: MY_NAMESPACE
 spec:
-  action: pod-failure
+  action: delay
   mode: one
   duration: '30m'
   selector:
     namespaces:
       - MY_NAMESPACE
     labelSelectors:
-      'app.kubernetes.io/component': 'recommendationservice'
+      'app.kubernetes.io/component': 'recommendation'
+  delay:
+    latency: '10s'
+    jitter: '1s'

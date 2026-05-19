@@ -313,32 +313,145 @@ curl -s -X POST http://localhost:8080/flagservice/flagd.evaluation.v1.Service/Re
 
 #### Typical session flow
 
+**Step 1 — Inject a random failure**
+
+The operator runs this. The scenario is chosen at random and shown to the operator only.
+
 ```bash
-# 1. Inject a random failure (operator sees which one was chosen)
 ./scripts/inject-failure.sh
+```
 
-# 2. Optionally share the symptom hint with the participant
+```
+[INFO]  Injecting failure scenario...
+[OK]    Failure injected.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Injected: cart-errors  [flagd (application)]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Flag set:   cartFailure = on
+
+  Symptom hint (share with participant):
+  Users are having trouble with their shopping carts. Adding
+  items seems fine but something goes wrong at checkout.
+
+  Run --reveal for the full explanation and Kibana path.
+  Run --revert when the session is done.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+To hide which scenario was triggered from everyone (including yourself), use `--quiet`:
+
+```bash
+./scripts/inject-failure.sh --quiet
+```
+
+```
+[INFO]  Injecting failure scenario...
+[OK]    Failure injected.
+
+  Running in quiet mode — scenario hidden.
+  Run --status for a hint, --reveal for the full answer.
+```
+
+---
+
+**Step 2 — Share the symptom hint with the participant** *(optional)*
+
+The hint is deliberately vague — enough for the participant to know something is wrong, not enough to give it away.
+
+```bash
 ./scripts/inject-failure.sh --status
+```
 
-# 3. After the participant has investigated, reveal the full answer
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Active Failure — Status
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Injected at:  2026-05-19T10:16:31Z
+  Type:         flagd (application)
+
+  Symptom hint:
+  Users are having trouble with their shopping carts. Adding items
+  seems fine but something goes wrong at checkout.
+
+  Run --reveal to see the full answer.
+  Run --revert to reset the demo.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+---
+
+**Step 3 — Reveal the answer** *(after the participant has investigated)*
+
+```bash
 ./scripts/inject-failure.sh --reveal
+```
 
-# 4. Reset the demo back to clean state (always shows what was active)
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Scenario: cart-errors  [flagd (application)]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Flag:     cartFailure = on
+
+  What happened:
+  The cartservice is returning an error on every EmptyCart call,
+  which is triggered during checkout. Look for 100% error rate on
+  cartservice in APM → Services.
+
+  Where to look in Kibana:
+  APM → Services → cartservice → Transactions → grpc route errors
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+---
+
+**Step 4 — Revert and restore the demo**
+
+Always reveals what was active before clearing state, even if you used `--quiet`.
+
+```bash
 ./scripts/inject-failure.sh --revert
 ```
+
+```
+[INFO]  Reverting scenario 'cart-errors'...
+[OK]    Flag 'cartFailure' reset to 'off'
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Scenario: cart-errors  [flagd (application)]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Flag:     cartFailure = on
+
+  What happened:
+  The cartservice is returning an error on every EmptyCart call,
+  which is triggered during checkout. Look for 100% error rate on
+  cartservice in APM → Services.
+
+  Where to look in Kibana:
+  APM → Services → cartservice → Transactions → grpc route errors
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Demo restored to clean state.
+```
+
+---
 
 #### All commands
 
 ```bash
-./scripts/inject-failure.sh                        # Random injection (operator sees the scenario)
-./scripts/inject-failure.sh --quiet                # Random injection, scenario hidden from everyone
-./scripts/inject-failure.sh --scenario=payment-partial  # Inject a specific scenario by ID
-./scripts/inject-failure.sh --preview              # Preview a random scenario without triggering it
-./scripts/inject-failure.sh --preview --scenario=payment-partial  # Preview a specific scenario
-./scripts/inject-failure.sh --status               # Show a vague symptom hint (safe to share)
-./scripts/inject-failure.sh --reveal               # Reveal the full answer + Kibana path
-./scripts/inject-failure.sh --revert               # Reset flags, clear state, reveal what was active
-./scripts/inject-failure.sh --list                 # List all available scenarios
+./scripts/inject-failure.sh                             # Random injection (operator sees the scenario)
+./scripts/inject-failure.sh --quiet                     # Random injection, scenario hidden from everyone
+./scripts/inject-failure.sh --scenario=<id>             # Inject a specific scenario by ID
+./scripts/inject-failure.sh --preview                   # Preview a random scenario without triggering it
+./scripts/inject-failure.sh --preview --scenario=<id>   # Preview a specific scenario
+./scripts/inject-failure.sh --status                    # Show a vague symptom hint (safe to share)
+./scripts/inject-failure.sh --reveal                    # Reveal the full answer + Kibana path
+./scripts/inject-failure.sh --revert                    # Reset flags/chaos, clear state, reveal what was active
+./scripts/inject-failure.sh --list                      # List all available scenarios
 ```
 
 #### Available scenarios

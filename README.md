@@ -8,6 +8,23 @@ Provision the [OpenTelemetry Astronomy Shop](https://github.com/open-telemetry/o
 
 ---
 
+## Use cases
+
+- **Replicate customer problems** — spin up a clean environment to reproduce and test solutions to real-world issues
+- **Demo videos** — a stable, realistic microservices app with live telemetry flowing into Kibana, ready to record
+- **Capture the Bug sessions** — inject random failures and benchmark how well Kibana (or an AI agent) can find and explain them
+
+---
+
+## Why this over running the OTel demo locally?
+
+- **Cloud-hosted infrastructure** — your laptop will struggle to run a 20-service Kubernetes cluster under load; GKE Autopilot scales automatically
+- **Chaos Mesh infrastructure faults** — inject failures that AI agents won't recognise out of the box; the flagd scenarios are in the OTel demo docs and likely in model training data, so agents can identify them by name without actually diagnosing anything
+- **Real GCP infrastructure** — inspect nodes, pods, and networking in the GCP console or with `gcloud`, not just in a local Docker environment
+- **Full `kubectl` access** — manage deployments, inspect logs, and apply manifests against a real cluster just as you would in production
+
+---
+
 ## Table of Contents
 
 - [Prerequisites](#prerequisites)

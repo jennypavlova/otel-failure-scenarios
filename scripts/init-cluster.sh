@@ -13,6 +13,8 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -107,11 +109,7 @@ else
 fi
 
 echo ""
-echo -e "${GREEN}${BOLD}Cluster ready.${NC}"
+echo -e "${GREEN}${BOLD}Cluster ready.${NC} Starting port-forwards..."
 echo ""
-echo "  Start port-forward:  kubectl port-forward svc/frontend-proxy 8080:8080 &>/dev/null &"
-echo "  Shop:                http://localhost:8080"
-echo "  Flag UI:             http://localhost:8080/feature"
-echo "  Load generator UI:   http://localhost:8080/loadgen"
-echo "  Jaeger UI:           http://localhost:8080/jaeger/ui"
-echo ""
+
+"${SCRIPT_DIR}/start-demo.sh"

@@ -1,0 +1,19 @@
+---
+# Capture the Bug scenario: force the cartservice pod into a failure state.
+# The pod remains running but all containers are marked as failed — Kubernetes
+# shows it as unavailable and APM captures connection errors from dependent services.
+# Duration: 30 minutes (auto-reverts; delete the resource to clean up the CRD).
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: ctb-pod-failure-cart
+  namespace: MY_NAMESPACE
+spec:
+  action: pod-failure
+  mode: one
+  duration: '30m'
+  selector:
+    namespaces:
+      - MY_NAMESPACE
+    labelSelectors:
+      'app.kubernetes.io/component': 'cart'

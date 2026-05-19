@@ -1,0 +1,19 @@
+---
+# Capture the Bug scenario: force the recommendationservice pod into a failure state.
+# The pod is marked unavailable — the product recommendation feature stops working
+# and APM shows connection errors from the frontend to the recommendation service.
+# Duration: 30 minutes (auto-reverts; delete the resource to clean up the CRD).
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: ctb-pod-failure-recommendation
+  namespace: MY_NAMESPACE
+spec:
+  action: pod-failure
+  mode: one
+  duration: '30m'
+  selector:
+    namespaces:
+      - MY_NAMESPACE
+    labelSelectors:
+      'app.kubernetes.io/component': 'recommendationservice'

@@ -2,6 +2,8 @@
 
 Provision the [OpenTelemetry Astronomy Shop](https://github.com/open-telemetry/opentelemetry-demo) running on a GKE Autopilot cluster and sending data to an Elastic Cloud (ESS) cluster. Trigger failure scenarios via flagd or [Chaos Mesh](https://chaos-mesh.org/), then analyse the results in Kibana.
 
+> This project was designed based on guidance from the [Elastic Observability Test Environments — OpenTelemetry Quick Start](https://studious-disco-k66oojq.pages.github.io/user-guide/opentelemetry-quick-start/#create-a-opentelemetry-demo-cluster).
+
 ![OTel Demo Overview](assets/overview.png)
 
 ---
@@ -15,10 +17,9 @@ Provision the [OpenTelemetry Astronomy Shop](https://github.com/open-telemetry/o
 - [Validating the Cluster in GCP](#validating-the-cluster-in-gcp)
 - [Managing the Kubernetes Infrastructure](#managing-the-kubernetes-infrastructure)
 - [Triggering Failure Scenarios](#triggering-failure-scenarios)
-  - [Method 1: flagd UI](#method-1-flagd-ui)
-  - [Method 2: flagd API (curl)](#method-2-flagd-api-curl)
-  - [Method 3: kubectl script](#method-3-kubectl-script)
-  - [Method 4: Chaos Mesh](#method-4-chaos-mesh)
+  - [Method 1: flagd — controlled failures](#method-1-flagd--controlled-failures)
+  - [Method 2: Capture the Bug — random injection](#method-2-capture-the-bug--random-injection)
+  - [Method 3: Chaos Mesh — infrastructure faults](#method-3-chaos-mesh--infrastructure-faults)
 - [Failure Scenario Catalogue](#failure-scenario-catalogue)
 - [Cluster Management](#cluster-management)
 
@@ -89,8 +90,10 @@ source .env
 oblt-cli cluster create custom \
   --template oteldemo \
   --parameter StackVersion=${STACK_VERSION} \
-  --parameter Template=elasticsearch
+  --parameter Template=observability
 ```
+
+> The `observability` template deploys both Elasticsearch and Kibana. If you only need an Elasticsearch cluster without Kibana, use `--parameter Template=elasticsearch` instead.
 
 A CI job runs (~5 minutes). When complete, **`oblt-robot-ci` sends you a Slack DM** containing:
 
@@ -103,19 +106,15 @@ A CI job runs (~5 minutes). When complete, **`oblt-robot-ci` sends you a Slack D
 
 **1. Initialise the cluster**
 
-Pass your cluster name to `init-cluster.sh` — it configures `kubectl`, resets all failure flags to off, and fixes the load generator in one step:
+Pass your cluster name to `init-cluster.sh` — it configures `kubectl`, resets all failure flags to off, fixes the load generator, and starts the port-forwards automatically:
 
 ```bash
 ./scripts/init-cluster.sh <your-cluster-name>
 ```
 
-**2. Start the port-forward**
+This leaves your terminal free. Port-forwards run in the background.
 
-```bash
-kubectl port-forward svc/frontend-proxy 8080:8080 &>/dev/null &
-```
-
-**3. Open the demo**
+**2. Open the demo**
 
 | URL | Description |
 |-----|-------------|
@@ -123,8 +122,12 @@ kubectl port-forward svc/frontend-proxy 8080:8080 &>/dev/null &
 | [http://localhost:8080/feature](http://localhost:8080/feature) | flagd feature flag UI |
 | [http://localhost:8080/loadgen](http://localhost:8080/loadgen) | Load generator UI |
 | [http://localhost:8080/jaeger/ui](http://localhost:8080/jaeger/ui) | Jaeger trace UI |
+| [http://localhost:2333](http://localhost:2333) | Chaos Mesh dashboard |
 
-> If you ever lose access (e.g. after a laptop sleep), re-run steps 1 and 2.
+> If you ever lose access (e.g. after a laptop sleep), restart the port-forwards:
+> ```bash
+> ./scripts/start-demo.sh
+> ```
 
 You can retrieve credentials at any time with:
 
@@ -154,12 +157,12 @@ Go to **Observability** to see traces, metrics, and logs from the OTel demo flow
 
 ### OTel Astronomy Shop — localhost via port-forward
 
-The demo web app has no external IP. Access it via `kubectl port-forward` as described in [the setup steps above](#once-you-have-your-cluster-name--run-these-steps-in-order).
-
-To stop the port-forward:
+The demo web app has no external IP. `init-cluster.sh` starts the port-forward automatically. If you need to manage it manually:
 
 ```bash
-pkill -f "kubectl port-forward svc/frontend-proxy"
+./scripts/start-demo.sh           # Start all port-forwards (idempotent)
+./scripts/start-demo.sh --status  # Check whether they are running
+./scripts/start-demo.sh --stop    # Stop all demo port-forwards
 ```
 
 ---
@@ -243,18 +246,56 @@ kubectl exec -it deploy/frontend -- sh
 
 ## Triggering Failure Scenarios
 
-### Method 1: flagd UI
+There are two main ways to trigger failures, plus an optional infrastructure-level layer via Chaos Mesh.
 
-1. Ensure port-forward is running
+---
+
+### Method 1: flagd — controlled failures
+
+The OpenTelemetry demo ships with [flagd](https://flagd.dev), a feature flagging system that lets you toggle failure scenarios on and off in real time. This is the primary mechanism for injecting application-level faults — things like payment errors, cart failures, memory leaks, and latency injections.
+
+#### Option A — Browser UI
+
+The easiest way to toggle flags manually. No terminal needed.
+
+1. Ensure the port-forward is running (`./scripts/start-demo.sh`)
 2. Open [http://localhost:8080/feature](http://localhost:8080/feature)
 3. Toggle flags using **Basic View** (on/off) or **Advanced View** (raw JSON)
 4. Changes take effect immediately — no restart needed
 
----
+#### Option B — Command line (`toggle-flag.sh`)
 
-### Method 2: flagd API (curl)
+Use `toggle-flag.sh` to set a specific flag from the terminal. It patches the flagd ConfigMap and restarts the pod automatically.
 
-Check the current state of any flag:
+```bash
+# Turn a flag on
+./scripts/toggle-flag.sh paymentFailure on
+
+# Turn it off
+./scripts/toggle-flag.sh paymentFailure off
+
+# Set a specific variant (for flags with multiple levels)
+./scripts/toggle-flag.sh paymentFailure on --variant="50%"
+./scripts/toggle-flag.sh emailMemoryLeak on --variant="100x"
+./scripts/toggle-flag.sh imageSlowLoad on --variant="5sec"
+```
+
+Check which flags are currently active:
+
+```bash
+./scripts/list-flags.sh              # All flags
+./scripts/list-flags.sh --active-only  # Only flags that are on
+```
+
+Reset everything to off in one go:
+
+```bash
+./scripts/reset-flags.sh
+```
+
+> **Note:** flagd copies its ConfigMap to a local volume on startup and doesn't watch for changes — a pod restart is required after each change. `toggle-flag.sh` handles this automatically. See [upstream issue #1953](https://github.com/open-telemetry/opentelemetry-demo/issues/1953).
+
+You can also verify the live state of any flag directly via the flagd API:
 
 ```bash
 curl -s -X POST http://localhost:8080/flagservice/flagd.evaluation.v1.Service/ResolveBoolean \
@@ -262,78 +303,89 @@ curl -s -X POST http://localhost:8080/flagservice/flagd.evaluation.v1.Service/Re
   -d '{"flagKey": "productCatalogFailure", "context": {}}'
 ```
 
-Response when off:
-```json
-{"value":false,"reason":"STATIC","variant":"off","metadata":{}}
+---
+
+### Method 2: Capture the Bug — random injection
+
+`inject-failure.sh` is designed for **guided demo sessions** where a participant investigates a live failure in Kibana without being told what went wrong. The operator injects a random scenario from a unified pool of **flagd (application-layer)** and **Chaos Mesh (infrastructure-layer)** failures; the participant finds it.
+
+> **GCP cost note:** Scenarios that cause sustained CPU spikes, memory leaks, or traffic floods (`emailMemoryLeak`, `loadGeneratorFloodHomepage`, `recommendationCacheFailure`, `adHighCpu`, `failedReadinessProbe`) are intentionally excluded from the random pool. Use `toggle-flag.sh` directly if you need them. Chaos Mesh scenarios auto-revert after 30 minutes if not manually reverted.
+
+#### Typical session flow
+
+```bash
+# 1. Inject a random failure (operator sees which one was chosen)
+./scripts/inject-failure.sh
+
+# 2. Optionally share the symptom hint with the participant
+./scripts/inject-failure.sh --status
+
+# 3. After the participant has investigated, reveal the full answer
+./scripts/inject-failure.sh --reveal
+
+# 4. Reset the demo back to clean state (always shows what was active)
+./scripts/inject-failure.sh --revert
 ```
 
-Response when on:
-```json
-{"value":true,"reason":"STATIC","variant":"on","metadata":{}}
+#### All commands
+
+```bash
+./scripts/inject-failure.sh                        # Random injection (operator sees the scenario)
+./scripts/inject-failure.sh --quiet                # Random injection, scenario hidden from everyone
+./scripts/inject-failure.sh --scenario=payment-partial  # Inject a specific scenario by ID
+./scripts/inject-failure.sh --preview              # Preview a random scenario without triggering it
+./scripts/inject-failure.sh --preview --scenario=payment-partial  # Preview a specific scenario
+./scripts/inject-failure.sh --status               # Show a vague symptom hint (safe to share)
+./scripts/inject-failure.sh --reveal               # Reveal the full answer + Kibana path
+./scripts/inject-failure.sh --revert               # Reset flags, clear state, reveal what was active
+./scripts/inject-failure.sh --list                 # List all available scenarios
 ```
+
+#### Available scenarios
+
+**flagd — application-layer failures**
+
+| ID | What breaks | Observable in Kibana |
+|----|-------------|----------------------|
+| `payment-partial` | ~50% of checkouts fail | APM → checkoutservice error rate spike |
+| `payment-down` | Checkout cannot reach payment service | APM → Service Map broken edge |
+| `cart-errors` | Cart empty fails on every checkout | APM → cartservice 100% error rate |
+| `product-missing` | One product returns errors | APM → productcatalogservice GetProduct errors |
+| `ad-errors` | Intermittent ad service errors | APM → adservice error rate |
+| `llm-rate-limit` | AI reviews intermittently fail with 429 | APM → llmservice errors |
+| `image-slow` | Product images take 5s to load | APM → frontend latency increase |
+| `kafka-lag` | Backend processing falls behind | APM → consumer lag, downstream latency |
+
+**Chaos Mesh — infrastructure-layer failures**
+
+| ID | What breaks | Observable in Kibana |
+|----|-------------|----------------------|
+| `chaos-net-delay-checkout` | 2s network delay on checkout pod | APM → checkoutservice p99 latency spike |
+| `chaos-pod-fail-cart` | Cart pod forced into failure state | Infrastructure → cart pod NotReady + APM errors |
+| `chaos-cpu-stress-frontend` | 80% CPU stress on frontend pod | Infrastructure → frontend CPU spike + APM latency |
+| `chaos-net-loss-payment` | 50% packet loss on payment pod | APM → paymentservice intermittent connection errors |
+| `chaos-pod-fail-recommendation` | Recommendation pod forced unavailable | Infrastructure → pod NotReady + APM service map |
+
+The active scenario is saved to `.failure-state` (gitignored) so it persists across terminal sessions. Running `--revert` always tells you what was active, even if the session was started by someone else.
 
 ---
 
-### Method 3: kubectl script
+### Method 3: Chaos Mesh — infrastructure faults
 
-Check the current state of all flags:
-
-```bash
-# All flags
-./scripts/list-flags.sh
-
-# Only flags that are currently active
-./scripts/list-flags.sh --active-only
-```
-
-Reset all flags to off in one go:
-
-```bash
-./scripts/reset-flags.sh
-```
-
-Use `scripts/toggle-flag.sh` to patch the flagd ConfigMap and restart the pod:
-
-```bash
-./scripts/toggle-flag.sh <flag-name> <on|off> [namespace] [release-name]
-```
-
-Examples:
-
-```bash
-./scripts/toggle-flag.sh paymentFailure on
-./scripts/toggle-flag.sh paymentFailure on otel-demo my-otel-demo --variant="50%"
-./scripts/toggle-flag.sh emailMemoryLeak on otel-demo my-otel-demo --variant="100x"
-./scripts/toggle-flag.sh paymentFailure off
-```
-
-> flagd copies its ConfigMap to a local volume on startup and doesn't watch for changes — a pod restart is required. The script handles this automatically. See [upstream issue #1953](https://github.com/open-telemetry/opentelemetry-demo/issues/1953).
-
-**Manual approach:**
-
-```bash
-kubectl get configmap opentelemetry-demo-flagd-config -o yaml > configmap.yml
-# edit configmap.yml — change defaultVariant for the flag you want
-kubectl apply -f configmap.yml
-FLAGD_POD=$(kubectl get po -l app.kubernetes.io/component=flagd --output=jsonpath={.items..metadata.name})
-kubectl delete "po/${FLAGD_POD}"
-```
-
----
-
-### Method 4: Chaos Mesh
-
-Chaos Mesh injects infrastructure-level faults — network latency, pod kills, memory pressure, IO errors.
+Chaos Mesh injects infrastructure-level faults — network latency, pod kills, memory pressure, IO errors — that go beyond what flagd can simulate.
 
 #### Access the Chaos Mesh UI
 
+`start-demo.sh` starts the Chaos Mesh port-forward automatically alongside the shop. If you need to start it manually:
+
 ```bash
-kubectl port-forward -n default svc/chaos-dashboard 2333:2333
+./scripts/start-demo.sh           # starts both forwards (idempotent)
+./scripts/start-demo.sh --status  # check if they are running
 ```
 
 Open [http://localhost:2333](http://localhost:2333) and create experiments via the UI.
 
-Get your current namespace:
+Get your current namespace if you need it for manual `kubectl` commands:
 
 ```bash
 kubectl config view --minify -o jsonpath='{..namespace}'
@@ -341,7 +393,7 @@ kubectl config view --minify -o jsonpath='{..namespace}'
 
 > **Warning:** Some experiments can destabilise the cluster. Target only the specific pods you intend to affect.
 
-#### Apply an example manifest
+#### Apply a pre-built manifest
 
 Pre-built experiment manifests are in `chaos-mesh/`. Replace `MY_NAMESPACE` with your cluster namespace before applying.
 

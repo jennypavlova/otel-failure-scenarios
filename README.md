@@ -313,129 +313,17 @@ curl -s -X POST http://localhost:8080/flagservice/flagd.evaluation.v1.Service/Re
 
 #### Typical session flow
 
-**Step 1 — Inject a random failure**
-
-The operator runs this. The scenario is chosen at random and shown to the operator only.
-
 ```bash
-./scripts/inject-failure.sh
+./scripts/inject-failure.sh          # 1. inject a random failure (operator sees which one)
+./scripts/inject-failure.sh --status # 2. check the symptom hint (safe to share with participant)
+./scripts/inject-failure.sh --reveal # 3. reveal the full answer + Kibana path
+./scripts/inject-failure.sh --revert # 4. reset the demo (always shows what was active)
 ```
 
-```
-[INFO]  Injecting failure scenario...
-[OK]    Failure injected.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Injected: cart-errors  [flagd (application)]
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  Flag set:   cartFailure = on
-
-  Symptom hint (share with participant):
-  Users are having trouble with their shopping carts. Adding
-  items seems fine but something goes wrong at checkout.
-
-  Run --reveal for the full explanation and Kibana path.
-  Run --revert when the session is done.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-```
-
-To hide which scenario was triggered from everyone (including yourself), use `--quiet`:
+Use `--quiet` to hide which scenario was triggered from everyone, including yourself:
 
 ```bash
 ./scripts/inject-failure.sh --quiet
-```
-
-```
-[INFO]  Injecting failure scenario...
-[OK]    Failure injected.
-
-  Running in quiet mode — scenario hidden.
-  Run --status for a hint, --reveal for the full answer.
-```
-
----
-
-**Step 2 — Share the symptom hint with the participant** *(optional)*
-
-The hint is deliberately vague — enough for the participant to know something is wrong, not enough to give it away.
-
-```bash
-./scripts/inject-failure.sh --status
-```
-
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Active Failure — Status
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  Injected at:  2026-05-19T10:16:31Z
-  Type:         flagd (application)
-
-  Symptom hint:
-  Users are having trouble with their shopping carts. Adding items
-  seems fine but something goes wrong at checkout.
-
-  Run --reveal to see the full answer.
-  Run --revert to reset the demo.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-```
-
----
-
-**Step 3 — Reveal the answer** *(after the participant has investigated)*
-
-```bash
-./scripts/inject-failure.sh --reveal
-```
-
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Scenario: cart-errors  [flagd (application)]
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  Flag:     cartFailure = on
-
-  What happened:
-  The cartservice is returning an error on every EmptyCart call,
-  which is triggered during checkout. Look for 100% error rate on
-  cartservice in APM → Services.
-
-  Where to look in Kibana:
-  APM → Services → cartservice → Transactions → grpc route errors
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-```
-
----
-
-**Step 4 — Revert and restore the demo**
-
-Always reveals what was active before clearing state, even if you used `--quiet`.
-
-```bash
-./scripts/inject-failure.sh --revert
-```
-
-```
-[INFO]  Reverting scenario 'cart-errors'...
-[OK]    Flag 'cartFailure' reset to 'off'
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Scenario: cart-errors  [flagd (application)]
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  Flag:     cartFailure = on
-
-  What happened:
-  The cartservice is returning an error on every EmptyCart call,
-  which is triggered during checkout. Look for 100% error rate on
-  cartservice in APM → Services.
-
-  Where to look in Kibana:
-  APM → Services → cartservice → Transactions → grpc route errors
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  Demo restored to clean state.
 ```
 
 ---

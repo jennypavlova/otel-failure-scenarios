@@ -445,14 +445,28 @@ Always reveals what was active before clearing state, even if you used `--quiet`
 ```bash
 ./scripts/inject-failure.sh                             # Random injection (operator sees the scenario)
 ./scripts/inject-failure.sh --quiet                     # Random injection, scenario hidden from everyone
+./scripts/inject-failure.sh --chaos-only                # Random Chaos Mesh scenario only (excludes flagd)
+./scripts/inject-failure.sh --quiet --chaos-only        # Quiet + Chaos Mesh only
 ./scripts/inject-failure.sh --scenario=<id>             # Inject a specific scenario by ID
 ./scripts/inject-failure.sh --preview                   # Preview a random scenario without triggering it
+./scripts/inject-failure.sh --preview --chaos-only      # Preview a random Chaos Mesh scenario
 ./scripts/inject-failure.sh --preview --scenario=<id>   # Preview a specific scenario
 ./scripts/inject-failure.sh --status                    # Show a vague symptom hint (safe to share)
 ./scripts/inject-failure.sh --reveal                    # Reveal the full answer + Kibana path
 ./scripts/inject-failure.sh --revert                    # Reset flags/chaos, clear state, reveal what was active
 ./scripts/inject-failure.sh --list                      # List all available scenarios
+./scripts/inject-failure.sh --list --chaos-only         # List only Chaos Mesh scenarios
 ```
+
+#### Testing AI agents — use `--chaos-only`
+
+When using this demo to evaluate AI agents (e.g. Kibana AI Assistant, Elastic Agent), use `--chaos-only` to restrict the random pool to **Chaos Mesh infrastructure failures only**:
+
+```bash
+./scripts/inject-failure.sh --chaos-only
+```
+
+flagd failures are well-documented in the official OpenTelemetry Demo documentation and are likely to be in an AI model's training data — the agent may recognise symptoms by name. Chaos Mesh failures operate at the infrastructure layer (network packets, pod lifecycle, CPU scheduling) and are not described in the OTel demo docs, making them a more genuine test of the agent's diagnostic ability.
 
 #### Available scenarios
 

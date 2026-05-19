@@ -8,13 +8,20 @@
 # Usage:
 #   ./scripts/inject-failure.sh                             # Random injection (operator sees which)
 #   ./scripts/inject-failure.sh --quiet                     # Random injection, scenario hidden
+#   ./scripts/inject-failure.sh --chaos-only                # Random Chaos Mesh scenario only (no flagd)
 #   ./scripts/inject-failure.sh --scenario=payment-partial  # Inject a specific scenario by ID
 #   ./scripts/inject-failure.sh --preview                   # Preview a random scenario (no changes)
+#   ./scripts/inject-failure.sh --preview --chaos-only      # Preview a random Chaos Mesh scenario
 #   ./scripts/inject-failure.sh --preview --scenario=<id>   # Preview a specific scenario
 #   ./scripts/inject-failure.sh --status                    # Show a vague symptom hint
 #   ./scripts/inject-failure.sh --reveal                    # Reveal the full scenario explanation
 #   ./scripts/inject-failure.sh --revert                    # Reset and reveal what was active
 #   ./scripts/inject-failure.sh --list                      # List all available scenarios
+#   ./scripts/inject-failure.sh --list --chaos-only         # List only Chaos Mesh scenarios
+#
+# Use --chaos-only when testing AI agents: flagd failures are well-documented in
+# the OpenTelemetry demo and may be known to the model. Chaos Mesh infrastructure
+# faults are lower-level and less likely to be in training data.
 #
 # Scenarios excluded for GCP cost reasons (not in the random pool):
 #   flagd: emailMemoryLeak, loadGeneratorFloodHomepage, recommendationCacheFailure,
@@ -164,6 +171,20 @@ Infrastructure → Kubernetes → Pods (recommendation pod NotReady) + APM → S
 
 )
 
+# ── Helper: filter scenario pool by type ─────────────────────────────────────
+# Returns a new array (by printing entries) filtered to the given type.
+# Usage: mapfile -t POOL < <(filter_scenarios "chaos-mesh")
+filter_scenarios() {
+  local filter_type="$1"
+  for scenario in "${SCENARIOS[@]}"; do
+    local type
+    type=$(scenario_field "$scenario" 2)
+    if [[ "$type" == "$filter_type" ]]; then
+      echo "$scenario"
+    fi
+  done
+}
+
 # ── Helper: check demo port-forwards are running ──────────────────────────────
 check_port_forwards() {
   local missing=()
@@ -306,12 +327,26 @@ print_reveal() {
 
 # ── Command: --list ────────────────────────────────────────────────────────────
 cmd_list() {
-  blank
-  echo -e "${BOLD}Available failure scenarios:${NC}"
+  local chaos_only=false
+  for arg in "$@"; do
+    [[ "$arg" == "--chaos-only" ]] && chaos_only=true
+  done
+
+  local -a pool
+  if [[ "$chaos_only" == true ]]; then
+    mapfile -t pool < <(filter_scenarios "chaos-mesh")
+    blank
+    echo -e "${BOLD}Chaos Mesh scenarios (infrastructure-layer):${NC}"
+  else
+    pool=("${SCENARIOS[@]}")
+    blank
+    echo -e "${BOLD}Available failure scenarios:${NC}"
+  fi
+
   blank
   printf "  ${BOLD}%-38s %-14s %-14s${NC}\n" "SCENARIO ID" "TYPE" "TARGET"
   printf "  ${DIM}%-38s %-14s %-14s${NC}\n" "─────────────────────────────────────" "─────────────" "─────────────"
-  for scenario in "${SCENARIOS[@]}"; do
+  for scenario in "${pool[@]}"; do
     local id type target variant
     id=$(scenario_field "$scenario" 1)
     type=$(scenario_field "$scenario" 2)
@@ -326,7 +361,7 @@ cmd_list() {
     fi
   done
   blank
-  echo -e "  ${DIM}Total: ${#SCENARIOS[@]} scenarios (${#SCENARIOS[@]%% *} flagd + chaos-mesh)${NC}"
+  echo -e "  ${DIM}Total: ${#pool[@]} scenario(s) shown.${NC}"
   echo -e "  ${DIM}Use --scenario=<id> to inject a specific one.${NC}"
   blank
 }
@@ -421,9 +456,11 @@ cmd_revert() {
 # ── Command: --preview ────────────────────────────────────────────────────────
 cmd_preview() {
   local specific_scenario=""
+  local chaos_only=false
   for arg in "$@"; do
     case "$arg" in
-      --scenario=*) specific_scenario="${arg#*=}" ;;
+      --scenario=*)  specific_scenario="${arg#*=}" ;;
+      --chaos-only)  chaos_only=true ;;
     esac
   done
 
@@ -432,9 +469,15 @@ cmd_preview() {
     chosen_scenario=$(get_scenario "$specific_scenario") || \
       die "Unknown scenario '${specific_scenario}'. Run --list to see available scenarios."
   else
-    local count=${#SCENARIOS[@]}
-    local idx=$(( RANDOM % count ))
-    chosen_scenario="${SCENARIOS[$idx]}"
+    local -a pool
+    if [[ "$chaos_only" == true ]]; then
+      mapfile -t pool < <(filter_scenarios "chaos-mesh")
+      (( ${#pool[@]} == 0 )) && die "No Chaos Mesh scenarios found."
+    else
+      pool=("${SCENARIOS[@]}")
+    fi
+    local idx=$(( RANDOM % ${#pool[@]} ))
+    chosen_scenario="${pool[$idx]}"
   fi
 
   local scenario_id type target variant hint explanation kibana_path
@@ -493,12 +536,14 @@ cmd_preview() {
 # ── Command: inject (default) ─────────────────────────────────────────────────
 cmd_inject() {
   local quiet=false
+  local chaos_only=false
   local specific_scenario=""
 
   for arg in "$@"; do
     case "$arg" in
-      --quiet)      quiet=true ;;
-      --scenario=*) specific_scenario="${arg#*=}" ;;
+      --quiet)       quiet=true ;;
+      --chaos-only)  chaos_only=true ;;
+      --scenario=*)  specific_scenario="${arg#*=}" ;;
     esac
   done
 
@@ -539,9 +584,15 @@ cmd_inject() {
     chosen_scenario=$(get_scenario "$specific_scenario") || \
       die "Unknown scenario '${specific_scenario}'. Run --list to see available scenarios."
   else
-    local count=${#SCENARIOS[@]}
-    local idx=$(( RANDOM % count ))
-    chosen_scenario="${SCENARIOS[$idx]}"
+    local -a pool
+    if [[ "$chaos_only" == true ]]; then
+      mapfile -t pool < <(filter_scenarios "chaos-mesh")
+      (( ${#pool[@]} == 0 )) && die "No Chaos Mesh scenarios found."
+    else
+      pool=("${SCENARIOS[@]}")
+    fi
+    local idx=$(( RANDOM % ${#pool[@]} ))
+    chosen_scenario="${pool[$idx]}"
   fi
 
   local scenario_id type target variant hint
@@ -613,26 +664,33 @@ EOF
 MODE="${1:-inject}"
 
 case "$MODE" in
-  --list)               cmd_list ;;
+  --list)               cmd_list "${@:2}" ;;
   --status)             cmd_status ;;
   --reveal)             cmd_reveal ;;
   --revert)             cmd_revert ;;
   --preview)            cmd_preview "${@:2}" ;;
-  --quiet | --scenario=*) cmd_inject "$@" ;;
+  --quiet | --chaos-only | --scenario=*) cmd_inject "$@" ;;
   inject)               cmd_inject ;;
   --help|-h)
     blank
     echo -e "${BOLD}inject-failure.sh${NC} — Capture the Bug demo failure injection"
     blank
-    echo "  (no args)                       Inject a random failure (operator sees which one)"
-    echo "  --quiet                         Inject without revealing the scenario"
-    echo "  --scenario=<id>                 Inject a specific scenario by ID"
-    echo "  --preview                       Preview a random scenario without triggering it"
-    echo "  --preview --scenario=<id>       Preview a specific scenario without triggering it"
-    echo "  --status                        Show a hint about the active failure"
-    echo "  --reveal                        Reveal the full scenario explanation"
-    echo "  --revert                        Reset flags/chaos, clear state, reveal what was active"
-    echo "  --list                          List all available scenarios"
+    echo "  (no args)                            Inject a random failure (operator sees which one)"
+    echo "  --quiet                              Inject without revealing the scenario"
+    echo "  --chaos-only                         Random Chaos Mesh scenario only (excludes flagd)"
+    echo "  --quiet --chaos-only                 Quiet + Chaos Mesh only"
+    echo "  --scenario=<id>                      Inject a specific scenario by ID"
+    echo "  --preview                            Preview a random scenario without triggering it"
+    echo "  --preview --chaos-only               Preview a random Chaos Mesh scenario"
+    echo "  --preview --scenario=<id>            Preview a specific scenario without triggering it"
+    echo "  --status                             Show a hint about the active failure"
+    echo "  --reveal                             Reveal the full scenario explanation"
+    echo "  --revert                             Reset flags/chaos, clear state, reveal what was active"
+    echo "  --list                               List all available scenarios"
+    echo "  --list --chaos-only                  List only Chaos Mesh scenarios"
+    blank
+    echo -e "  ${DIM}Use --chaos-only when testing AI agents: flagd failures are well-documented${NC}"
+    echo -e "  ${DIM}in the OTel demo and may be known to the model. Chaos Mesh faults are not.${NC}"
     blank
     ;;
   *)

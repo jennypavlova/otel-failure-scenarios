@@ -54,36 +54,50 @@ echo -e "${BOLD}OTel Demo — cluster initialisation${NC}"
 echo "Namespace: ${NAMESPACE}"
 echo ""
 
-# ── 1. Reset all flagd flags to off ───────────────────────────────────────────
-echo -e "${BOLD}Step 1/2 — Resetting flagd failure flags${NC}"
+# ── 1. Sync canonical flagd config and reset all flags to off ────────────────
+echo -e "${BOLD}Step 1/2 — Syncing flagd config and resetting flags${NC}"
 
 FLAGD_POD=$(kubectl get po -l app.kubernetes.io/component=flagd \
   -n "$NAMESPACE" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
 [[ -z "$FLAGD_POD" ]] && die "flagd pod not found. Is kubectl configured correctly?"
 
-info "Reading live flag config from pod '$FLAGD_POD'..."
-CURRENT_JSON=$(kubectl exec "$FLAGD_POD" -c flagd-ui -n "$NAMESPACE" -- \
-  cat /app/data/demo.flagd.json)
+CANONICAL_FILE="${SCRIPT_DIR}/../flagd/demo.flagd.json"
+[[ -f "$CANONICAL_FILE" ]] || die "Canonical flagd config not found: ${CANONICAL_FILE}"
 
-ACTIVE=$(echo "$CURRENT_JSON" | jq -r '
-  .flags | to_entries[]
-  | select(.value.defaultVariant != "off")
-  | "  \(.key): \(.value.defaultVariant)"
-')
+# Check what's live vs what should be there
+LIVE_FLAGS=$(kubectl exec "$FLAGD_POD" -c flagd-ui -n "$NAMESPACE" -- \
+  cat /app/data/demo.flagd.json | jq -r '.flags | keys | sort | @csv' 2>/dev/null)
+CANONICAL_FLAGS=$(jq -r '.flags | keys | sort | @csv' "$CANONICAL_FILE")
 
-if [[ -z "$ACTIVE" ]]; then
-  success "All flags already off"
-else
+ACTIVE=$(kubectl exec "$FLAGD_POD" -c flagd-ui -n "$NAMESPACE" -- \
+  cat /app/data/demo.flagd.json | jq -r '
+    .flags | to_entries[]
+    | select(.value.defaultVariant != "off")
+    | "  \(.key): \(.value.defaultVariant)"
+  ')
+
+NEEDS_SYNC=false
+if [[ "$LIVE_FLAGS" != "$CANONICAL_FLAGS" ]]; then
+  warn "Live flagd config is missing flags — syncing canonical config from flagd/demo.flagd.json..."
+  NEEDS_SYNC=true
+fi
+
+if [[ -n "$ACTIVE" ]]; then
   echo "Turning off:"
   echo "$ACTIVE"
-  RESET_JSON=$(echo "$CURRENT_JSON" | jq '
-    .flags |= with_entries(.value.defaultVariant = "off")
-  ')
-  PATCH_PAYLOAD=$(jq -n --arg json "$RESET_JSON" '{"data": {"demo.flagd.json": $json}}')
-  kubectl patch configmap flagd-config -n "$NAMESPACE" --type merge --patch "$PATCH_PAYLOAD"
-  kubectl rollout restart deployment/flagd -n "$NAMESPACE"
-  kubectl rollout status deployment/flagd -n "$NAMESPACE" --timeout=120s
-  success "All flags reset to off"
+  NEEDS_SYNC=true
+fi
+
+if [[ "$NEEDS_SYNC" == true ]]; then
+  # Always write the full canonical config (all flags present, all set to off)
+  CANONICAL_JSON=$(jq '.flags |= with_entries(.value.defaultVariant = "off")' "$CANONICAL_FILE")
+  PATCH_PAYLOAD=$(jq -n --arg json "$CANONICAL_JSON" '{"data": {"demo.flagd.json": $json}}')
+  kubectl patch configmap flagd-config -n "$NAMESPACE" --type merge --patch "$PATCH_PAYLOAD" &>/dev/null
+  kubectl rollout restart deployment/flagd -n "$NAMESPACE" &>/dev/null
+  kubectl rollout status deployment/flagd -n "$NAMESPACE" --timeout=120s &>/dev/null
+  success "flagd config synced and all flags reset to off"
+else
+  success "All flags already correct"
 fi
 
 echo ""

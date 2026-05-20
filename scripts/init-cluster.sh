@@ -20,6 +20,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
+DIM='\033[2m'
 NC='\033[0m'
 
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
@@ -123,6 +124,56 @@ else
 fi
 
 echo ""
+
+# ── 3. Retrieve and store Elastic credentials in .env ────────────────────────
+if [[ -n "$CLUSTER_NAME" ]]; then
+  echo -e "${BOLD}Step 3/3 — Retrieving Elastic credentials${NC}"
+
+  CREDS_OUTPUT=$(oblt-cli cluster secrets credentials --cluster-name "${CLUSTER_NAME}" 2>/dev/null)
+
+  KIBANA_URL=$(echo "$CREDS_OUTPUT"    | grep "^* Kibana:"         | head -1 | awk '{print $3}')
+  ES_URL=$(echo "$CREDS_OUTPUT"        | grep "^* Elasticsearch:"  | head -1 | awk '{print $3}')
+  ES_PASSWORD=$(echo "$CREDS_OUTPUT"   | grep "^  password:"       | head -1 | awk '{print $2}')
+  KIBANA_API_KEY=$(echo "$CREDS_OUTPUT" | grep "^  api_key:"       | head -1 | awk '{print $2}')
+
+  ENV_FILE="${SCRIPT_DIR}/../.env"
+
+  if [[ -n "$KIBANA_URL" && -n "$ES_PASSWORD" ]]; then
+    # Preserve existing lines that aren't credential keys or the auto-generated comment block
+    PRESERVED=$(grep -v -E \
+      "^KIBANA_URL=|^KIBANA_USERNAME=|^KIBANA_PASSWORD=|^KIBANA_API_KEY=|^ELASTICSEARCH_URL=|^ELASTICSEARCH_USERNAME=|^ELASTICSEARCH_PASSWORD=|^# Elastic cluster credentials" \
+      "$ENV_FILE" 2>/dev/null | sed '/^$/N;/^\n$/d' | sed -e 's/[[:space:]]*$//' || true)
+
+    {
+      echo "$PRESERVED"
+      echo ""
+      echo "# Elastic cluster credentials (auto-populated by init-cluster.sh)"
+      echo "KIBANA_URL=${KIBANA_URL}"
+      echo "KIBANA_USERNAME=elastic"
+      echo "KIBANA_PASSWORD=${ES_PASSWORD}"
+      [[ -n "$KIBANA_API_KEY" ]] && echo "KIBANA_API_KEY=${KIBANA_API_KEY}"
+      echo "ELASTICSEARCH_URL=${ES_URL}"
+      echo "ELASTICSEARCH_USERNAME=elastic"
+      echo "ELASTICSEARCH_PASSWORD=${ES_PASSWORD}"
+    } > "$ENV_FILE"
+
+    success "Credentials written to .env"
+    echo -e "  ${BOLD}Kibana:${NC}        ${KIBANA_URL}"
+    echo -e "  ${BOLD}Elasticsearch:${NC} ${ES_URL}"
+    echo -e "  ${BOLD}Username:${NC}      elastic"
+    echo -e "  ${DIM}Source credentials with: source .env${NC}"
+  else
+    warn "Could not parse credentials from oblt-cli output — skipping .env update"
+    warn "Run manually: oblt-cli cluster secrets credentials --cluster-name ${CLUSTER_NAME}"
+  fi
+
+  echo ""
+else
+  info "No cluster name provided — skipping credential retrieval"
+  info "Re-run with your cluster name to populate .env: ./scripts/init-cluster.sh <cluster-name>"
+  echo ""
+fi
+
 echo -e "${GREEN}${BOLD}Cluster ready.${NC} Starting port-forwards..."
 echo ""
 

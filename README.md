@@ -11,6 +11,7 @@ The repo also includes [Elastic Agent Skills](docs/ai-agent-integration.md) so A
 ### Why should I use it?
 
 - **Real infrastructure failures** — reproduce failure modes that don't exist locally: CPU saturation, OOMKills, pod eviction, and network policy faults on a live GKE cluster
+- **Signal-selective testing** — mute logs, metrics, or traces individually to simulate environments that only send a subset of signals, and test how well your dashboards and alerts hold up
 - **Full cluster access** — inspect nodes, pods, and workloads with [`kubectl`](https://kubernetes.io/docs/tasks/tools/) and [`gcloud`](https://cloud.google.com/sdk/gcloud), just as you would in production
 - **AI-proof scenarios** — the [K8s-native faults](docs/failure-scenarios.md) go beyond [flagd](https://flagd.dev) presets that are already in AI training data; they look like real production incidents and require genuine investigation through APM, logs, and infrastructure metrics to diagnose
 

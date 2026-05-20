@@ -363,6 +363,48 @@ K8s observation: injection set `replicas: 0` — `kubectl get deployment product
 
 ---
 
+### Shipping Bad Quote Service Address (`chaos-env-fail-shipping`)
+
+| Field | Value |
+|-------|-------|
+| **Scenario ID** | `chaos-env-fail-shipping` |
+| **Fault folder** | `k8s-faults/scenarios/ctb-shipping-bad-quote-addr` |
+| **What breaks** | `QUOTE_ADDR` env var on `shipping` deployment set to a non-existent hostname |
+| **Realistic story** | A config migration PR updated the shipping service to read its quote service endpoint from an env var (`QUOTE_ADDR`) rather than a hardcoded value. During the migration the env var was set to the old internal hostname (`quote-old:8080`) that had been renamed as part of a service reorganisation. The pod deployed and rolled out successfully — shipping only contacts the quote service per-request, not at startup — so the bad config passed CI and wasn't caught until traffic hit the new pod. Every call to `GetQuote` fails with a DNS resolution error. |
+| **Symptoms** | All checkout attempts fail at the shipping step. Critically, the shipping pod is `1/1 Running` with 0 restarts — `kubectl get pods` shows nothing wrong. The fault is entirely invisible at the infrastructure layer. APM is the only place where the 100% error rate on `shipping` is visible. Checkout error rate climbs to ~25% as all order completions fail when shipping cost cannot be calculated. |
+| **Root cause** | The shipping service dials `QUOTE_ADDR` on every `GetQuote` HTTP request. DNS resolution fails for `quote-old`, the HTTP call returns a connection error, and shipping returns an error to checkout. The pod starts cleanly and passes readiness checks — the bad config is only exercised at request time. |
+| **Kibana** | APM → Services → shipping — 100% error rate on `GetQuote` spans. APM → Service Map — checkout → shipping edge shows errors. APM → Services → checkout — error rate spike (~25%). Infrastructure → Kubernetes → Pods — no anomalies (pod Running/Ready). |
+
+**kubectl investigation:**
+
+```bash
+# Pod looks completely healthy — this is the misleading signal
+kubectl get pods -n <namespace> -l app.kubernetes.io/component=shipping
+# → STATUS: Running, READY: 1/1, RESTARTS: 0
+
+# Find the bad env var
+kubectl get deployment shipping -n <namespace> -o yaml | grep QUOTE_ADDR
+# → QUOTE_ADDR: http://quote-old:8080
+
+# Confirm requests are failing with DNS errors
+kubectl logs -n <namespace> -l app.kubernetes.io/component=shipping --tail=20
+# → connection error: dial tcp: lookup quote-old: no such host
+```
+
+The tell: `QUOTE_ADDR=http://quote-old:8080` in the deployment — combined with a 100% error rate in APM on `shipping` and a fully-healthy pod in `kubectl get pods`. The pod health check passes because shipping starts without contacting the quote service; the fault is only exercised at request time.
+
+**Verified test run (2026-05-20):**
+
+| Phase | shipping: req/min | errors | error% | checkout: req/min | checkout: errors | checkout: error% |
+|-------|-------------------|--------|--------|-------------------|------------------|-----------------|
+| Baseline (14:23–14:27 UTC) | 12–18 | 0 | 0% | 52–76 | 0 | 0% |
+| Post-injection (14:29–14:30 UTC) | 2–18 | 2–18 | **100%** | 8–68 | 2–18 | **25–26.5%** |
+| Post-revert (14:31–14:34 UTC) | 6–18 | 0 | 0% | 24–82 | 0 | **0%** |
+
+K8s observation: injection set `QUOTE_ADDR=http://quote-old:8080`; pod rolled out successfully in 4 seconds, `kubectl get pods` showed `1/1 Running` with `RESTARTS: 0` throughout the entire fault window — the pod never crashed. Shipping error rate reached 100% within one minute of injection. Caller signal: checkout error rate climbed from 0% to 26.5% peak. Post-revert: `kubectl set env` restored the correct address, pod rolled out in 4 seconds; both shipping and checkout returned to 0% errors within one minute.
+
+---
+
 ### Recommendation Scaled to Zero (`chaos-pod-fail-recommendation`)
 
 | Field | Value |

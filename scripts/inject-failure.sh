@@ -281,6 +281,27 @@ DB_CONNECTION_STRING pointing to postgresql-broken. kubectl get pods shows \
 CrashLoopBackOff with RESTARTS climbing.|\
 kubectl get pods -l app.kubernetes.io/component=product-catalog — STATUS CrashLoopBackOff, RESTARTS climbing. kubectl describe pod <product-catalog-pod> — Last State Terminated, Exit Code 1, runtime < 2 seconds. kubectl get deployment product-catalog -o yaml — DB_CONNECTION_STRING set to non-existent hostname. APM → Services → product-catalog — zero throughput (pod never runs). APM → Services → frontend — error rate spike on all product-related transactions"
 
+  "chaos-env-fail-shipping|k8s-fault|k8s-faults/scenarios/ctb-shipping-bad-quote-addr|-|\
+Checkout is broken — users cannot complete any purchases. Strangely, all \
+the pods look healthy.|\
+All checkout attempts fail at the shipping step. The shipping service is returning \
+errors on every GetQuote call — but unlike a CrashLoopBackOff, the shipping pod is \
+1/1 Running with no restarts. kubectl get pods shows nothing wrong. Logs reveal a \
+gRPC connection error on each request: the service is trying to reach a hostname \
+that does not exist. The QUOTE_ADDR env var points to http://quote-old:8080 — a \
+hostname that was decommissioned as part of a service rename. Checkout error rate \
+is ~25%%.|\
+A config migration PR updated the shipping service to read its quote service \
+endpoint from an env var (QUOTE_ADDR) rather than a hardcoded value. The env var \
+was set to the old hostname (quote-old) that was renamed during a service \
+reorganisation. The pod deployed successfully — shipping only contacts the quote \
+service per-request, not at startup — so the bad config was not caught until \
+traffic hit. Every call to GetQuote fails with a DNS resolution error, and shipping \
+returns an error to checkout on every order. Root cause: kubectl get deployment \
+shipping -o yaml shows QUOTE_ADDR=http://quote-old:8080. The pod is Running, which \
+makes this harder to spot than a CrashLoopBackOff.|\
+kubectl get pods -l app.kubernetes.io/component=shipping — STATUS Running, READY 1/1, RESTARTS 0 (misleading). kubectl get deployment shipping -o yaml — QUOTE_ADDR set to http://quote-old:8080. kubectl logs -l app.kubernetes.io/component=shipping — gRPC connection error on every GetQuote call. APM → Services → shipping — 100%% error rate. APM → Services → checkout — error rate spike (~25%%). APM → Service Map — checkout to shipping edge shows errors"
+
   "chaos-pod-fail-recommendation|k8s-fault|k8s-faults/scenarios/ctb-recommendation-scaled-zero|-|\
 Product pages are completely broken — they time out and never load. The \
 recommendation service has no running pods.|\

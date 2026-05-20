@@ -408,6 +408,7 @@ flagd failures are well-documented in the official OpenTelemetry Demo documentat
 | `chaos-cpu-stress-frontend` | CPU limit `5m` added to frontend | Platform script had unit conversion bug — wrote `5m` instead of `500m` | APM → all frontend transactions uniformly slower; `kubectl top` shows CPU at limit |
 | `chaos-pod-fail-productcatalog` | `product-catalog` deployment scaled to 0 replicas | Weekend cost-reduction automation identified catalog as "low-utilization" during off-hours and zeroed replicas | APM → product-catalog dark, frontend error rate spikes to 50–60% |
 | `chaos-db-fail-productcatalog` | `DB_CONNECTION_STRING` env var set to a non-existent PostgreSQL hostname | Database migration PR used wrong hostname — CI passed because the string is only validated at runtime | kubectl → product-catalog in CrashLoopBackOff, frontend error rate 30–57% |
+| `chaos-env-fail-shipping` | `QUOTE_ADDR` env var set to a decommissioned hostname | Config migration PR used old service hostname — pod rolls out healthy but every shipping quote request fails | APM → shipping 100% error rate, checkout ~25% errors; pod shows Running/Ready (no CrashLoopBackOff) |
 
 The active scenario is saved to `.failure-state` (gitignored) so it persists across terminal sessions. Running `--revert` always tells you what was active, even if the session was started by someone else.
 

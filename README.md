@@ -160,7 +160,7 @@ This leaves your terminal free. Port-forwards run in the background.
 
 ---
 
-### Validating the Cluster in GCP
+### (Optional) Validating the Cluster in GCP
 
 The `oteldemo` clusters run on GKE Autopilot in the `elastic-observability` GCP project. You can use the `gcloud` CLI to confirm your cluster exists and inspect its GCP-level configuration.
 
@@ -195,7 +195,7 @@ This shows node pool configuration, machine types, autoscaling settings, and GCP
 
 ---
 
-### Managing the Kubernetes Infrastructure
+### (Optional) Managing the Kubernetes Infrastructure
 
 Once `kubectl` is configured (via `oblt-cli cluster k8s`), you have full access to inspect and modify every workload in the cluster.
 

@@ -308,6 +308,18 @@ kubectl get deployment recommendation -n <namespace> -o yaml | grep replicas
 
 The tell: `kubectl get deployment recommendation` shows `READY 0/0`. No pods means no traffic can be served. The fix is `kubectl scale deployment recommendation --replicas=1`.
 
+**Verified test run (2026-05-20):**
+
+| Phase | frontend → recommendation: req/min | errors | error% | avg latency (ms) |
+|-------|-------------------------------------|--------|--------|-----------------|
+| Baseline (09:49–10:03 UTC) | 2–8 | 0 | 0% | 10,000–17,000 |
+| Injection (10:04 UTC — pod Terminating) | 2 | 1 | 50% | 7,036 |
+| Post-injection (10:05–10:10 UTC) | 3–8 | 3–8 | **100%** | 639–742 |
+| Revert transition (10:11 UTC) | 6 | 3 | 50% | 6,783 |
+| Post-revert (10:12–10:13 UTC) | 2–7 | 0 | 0% | 12,000–12,400 |
+
+K8s observation: injection set `replicas: 0` — `kubectl get deployment recommendation` showed `READY 0/0` immediately; pod entered `Terminating` within 1 second and the selector returned no resources. The `recommendation` service disappeared from APM traces after 10:04 (final 3 in-flight spans from the terminating pod). Caller signal: `frontend` → `grpc.oteldemo.RecommendationService/ListRecommendations` spans went from 0% errors to **100% error rate** with gRPC status code **14 (UNAVAILABLE)** and fast failures (~650ms avg, not a full timeout — K8s returns UNAVAILABLE immediately when no endpoints exist). Post-revert: `kubectl scale` restored `replicas: 1`, pod was `1/1 Running` within 8 seconds; error rate dropped from 100% → 50% → 0% within 2 minutes.
+
 ---
 
 ### Cart Bad Redis Config (`chaos-pod-fail-cart`)

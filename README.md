@@ -165,7 +165,7 @@ A CI job runs (~5 minutes). When complete, **`oblt-robot-ci` sends you a Slack D
 
 **1. Initialise the cluster**
 
-Pass your cluster name to `init-cluster.sh` — it configures `kubectl`, resets all failure flags to off, fixes the load generator, retrieves your Elastic credentials into `.env`, and starts the port-forwards automatically:
+Pass your cluster name to `init-cluster.sh` — it configures `kubectl`, resets all failure flags to off, fixes the load generator, patches the OTel Collector to add Kubernetes resource attributes to traces, retrieves your Elastic credentials into `.env`, and starts the port-forwards automatically:
 
 ```bash
 ./scripts/init-cluster.sh <your-cluster-name>
@@ -174,6 +174,8 @@ Pass your cluster name to `init-cluster.sh` — it configures `kubectl`, resets 
 This leaves your terminal free. Port-forwards run in the background.
 
 > The credentials saved to `.env` (Kibana URL, Elasticsearch URL, username, password, API key) are picked up automatically by the [Elastic Agent Skills](#ai-agent-integration), so your AI agent can query latency, error rates, logs, and service health directly against the live cluster.
+
+> **OTel Collector patch:** The upstream `oteldemo` template omits `k8sattributes` from the daemon collector's APM pipelines, so `k8s.pod.name`, `k8s.node.name`, `k8s.namespace.name`, and `container.id` are absent from all trace documents — breaking infrastructure correlation in Kibana. `init-cluster.sh` detects this and patches the `opentelemetry-kube-stack-daemon` CRD automatically. Once the upstream template is fixed, the check becomes a no-op.
 
 **2. Open the demo**
 

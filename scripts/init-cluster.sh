@@ -56,7 +56,7 @@ echo "Namespace: ${NAMESPACE}"
 echo ""
 
 # ── 1. Sync canonical flagd config and reset all flags to off ────────────────
-echo -e "${BOLD}Step 1/2 — Syncing flagd config and resetting flags${NC}"
+echo -e "${BOLD}Step 1/4 — Syncing flagd config and resetting flags${NC}"
 
 FLAGD_POD=$(kubectl get po -l app.kubernetes.io/component=flagd \
   -n "$NAMESPACE" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
@@ -104,7 +104,7 @@ fi
 echo ""
 
 # ── 2. Tune load generator ────────────────────────────────────────────────────
-echo -e "${BOLD}Step 2/2 — Tuning load generator${NC}"
+echo -e "${BOLD}Step 2/4 — Tuning load generator${NC}"
 
 # The oteldemo template sets LOCUST_USERS=50, which consistently OOMKills the
 # pod under GKE Autopilot's default memory limits. Drop to 10 users, which
@@ -125,9 +125,92 @@ fi
 
 echo ""
 
-# ── 3. Retrieve and store Elastic credentials in .env ────────────────────────
+# ── 3. Ensure OTel daemon collector has k8sattributes in APM pipelines ────────
+# App services send OTLP to the daemon collector, which forwards to the gateway
+# via the traces/apm and logs/apm pipelines. The upstream oteldemo template
+# omits k8sattributes from these pipelines, so k8s.pod.name, k8s.node.name,
+# k8s.namespace.name, and container.id are absent from every trace document —
+# breaking infrastructure correlation in Kibana.
+#
+# The fix adds k8sattributes/apm (cluster-wide, no per-node filter) to the
+# traces/apm and logs/apm pipelines. The operator regenerates the ConfigMap
+# and rolls the daemonset pods automatically.
+echo -e "${BOLD}Step 3/4 — Checking OTel daemon collector${NC}"
+
+DAEMON_CRD="opentelemetry-kube-stack-daemon"
+
+if kubectl get opentelemetrycollector "$DAEMON_CRD" -n "$NAMESPACE" -o json 2>/dev/null \
+    | jq -e '.spec.config.processors["k8sattributes/apm"]' > /dev/null 2>&1; then
+  success "OTel daemon collector already has k8sattributes/apm processor"
+else
+  warn "k8sattributes/apm missing from upstream template — patching now..."
+
+  CURRENT=$(kubectl get opentelemetrycollector "$DAEMON_CRD" -n "$NAMESPACE" -o json)
+
+  TRACES_APM_PROCS=$(echo "$CURRENT" | jq '.spec.config.service.pipelines["traces/apm"].processors')
+  LOGS_APM_PROCS=$(echo "$CURRENT"   | jq '.spec.config.service.pipelines["logs/apm"].processors')
+
+  NEW_TRACES_APM=$(echo "$TRACES_APM_PROCS" | jq '["k8sattributes/apm"] + .')
+  NEW_LOGS_APM=$(echo "$LOGS_APM_PROCS"     | jq '["k8sattributes/apm"] + .')
+
+  PATCH=$(jq -n \
+    --argjson traces_apm "$NEW_TRACES_APM" \
+    --argjson logs_apm   "$NEW_LOGS_APM" \
+    '{
+      "spec": {
+        "config": {
+          "processors": {
+            "k8sattributes/apm": {
+              "passthrough": false,
+              "extract": {
+                "metadata": [
+                  "k8s.namespace.name",
+                  "k8s.pod.name",
+                  "k8s.pod.uid",
+                  "k8s.deployment.name",
+                  "k8s.statefulset.name",
+                  "k8s.daemonset.name",
+                  "k8s.replicaset.name",
+                  "k8s.node.name",
+                  "container.id"
+                ],
+                "labels": [
+                  {"from": "node", "key": "cloud.google.com/gke-nodepool",     "tag_name": "cloud.google.com/gke-nodepool"},
+                  {"from": "node", "key": "topology.kubernetes.io/zone",       "tag_name": "topology.kubernetes.io/zone"},
+                  {"from": "node", "key": "topology.kubernetes.io/region",     "tag_name": "topology.kubernetes.io/region"}
+                ]
+              },
+              "pod_association": [
+                {"sources": [{"from": "resource_attribute", "name": "k8s.pod.ip"}]},
+                {"sources": [{"from": "resource_attribute", "name": "k8s.pod.uid"}]},
+                {"sources": [{"from": "connection"}]}
+              ]
+            }
+          },
+          "service": {
+            "pipelines": {
+              "traces/apm": {"processors": $traces_apm},
+              "logs/apm":   {"processors": $logs_apm}
+            }
+          }
+        }
+      }
+    }')
+
+  kubectl patch opentelemetrycollector "$DAEMON_CRD" \
+    -n "$NAMESPACE" --type=merge -p "$PATCH"
+
+  kubectl rollout status "daemonset/${DAEMON_CRD}-collector" \
+    -n "$NAMESPACE" --timeout=120s
+
+  success "k8sattributes/apm processor added — k8s.pod.name, container.id, and k8s.node.name will now appear in traces"
+fi
+
+echo ""
+
+# ── 4. Retrieve and store Elastic credentials in .env ────────────────────────
 if [[ -n "$CLUSTER_NAME" ]]; then
-  echo -e "${BOLD}Step 3/3 — Retrieving Elastic credentials${NC}"
+  echo -e "${BOLD}Step 4/4 — Retrieving Elastic credentials${NC}"
 
   CREDS_OUTPUT=$(oblt-cli cluster secrets credentials --cluster-name "${CLUSTER_NAME}" 2>/dev/null)
 

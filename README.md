@@ -2,13 +2,13 @@
 
 ## Overview
 
-**What is this?**
+### What is this?
 
 This repo provisions [OpenTelemetry Astronomy Shop](https://github.com/open-telemetry/opentelemetry-demo) — a realistic 17-service microservices application — on a [GKE Autopilot](https://cloud.google.com/kubernetes-engine/docs/concepts/autopilot-overview) cluster in Google Cloud, with telemetry flowing into an [Elastic Cloud](https://www.elastic.co/cloud) cluster. It allows you to inject [failure scenarios](docs/failure-scenarios.md) and analyse the results in Kibana.
 
 The repo also includes [Elastic Agent Skills](docs/ai-agent-integration.md) so AI coding agents (Cursor, GitHub Copilot, Windsurf, and more) can query the live cluster directly — querying latency, error rates, service dependencies, and logs — without any manual credential setup.
 
-**Why should I use it?**
+### Why should I use it?
 
 - **Real infrastructure failures** — reproduce failure modes that don't exist locally: CPU saturation, OOMKills, pod eviction, and network policy faults on a live GKE cluster
 - **Full cluster access** — inspect nodes, pods, and workloads with [`kubectl`](https://kubernetes.io/docs/tasks/tools/) and [`gcloud`](https://cloud.google.com/sdk/gcloud), just as you would in production
@@ -34,25 +34,25 @@ The repo also includes [Elastic Agent Skills](docs/ai-agent-integration.md) so A
 
 ## Table of Contents
 
-- [Use cases](#use-cases)
-- [Architecture](#architecture)
-- [Prerequisites](#prerequisites)
-  - [Installing oblt-cli](#installing-oblt-cli)
-- [Create the Cluster](#create-the-cluster)
-- [Access the Demo](#access-the-demo)
-- [Validating the Cluster in GCP](#validating-the-cluster-in-gcp)
-- [Managing the Kubernetes Infrastructure](#managing-the-kubernetes-infrastructure)
-- [Triggering Failure Scenarios](#triggering-failure-scenarios)
+- [Getting Started](#getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Create the Cluster](#create-the-cluster)
+  - [Validating the Cluster in GCP](#validating-the-cluster-in-gcp)
+  - [Managing the Kubernetes Infrastructure](#managing-the-kubernetes-infrastructure)
+- [Accessing Kibana](#accessing-kibana)
+- [Triggering Failures](#triggering-failures)
   - [Method 1: flagd — controlled failures](#method-1-flagd--controlled-failures)
   - [Method 2: Capture the Bug — random injection](#method-2-capture-the-bug--random-injection)
   - [Method 3: Chaos Mesh — scheduled infrastructure experiments](#method-3-chaos-mesh--scheduled-infrastructure-experiments)
-- [Failure Scenario Catalogue](docs/failure-scenarios.md)
+  - [Failure Scenario Catalogue](docs/failure-scenarios.md)
 - [FAQ](#faq)
-- [Cluster Management](#cluster-management)
+- [Reference](#reference)
 
 ---
 
-## Prerequisites
+## Getting Started
+
+### Prerequisites
 
 | Tool | Purpose |
 |------|---------|
@@ -61,11 +61,9 @@ The repo also includes [Elastic Agent Skills](docs/ai-agent-integration.md) so A
 | [`kubectl`](https://kubernetes.io/docs/tasks/tools/) | Manage the GKE cluster |
 | [`jq`](https://jqlang.org/download/) | Used by `scripts/toggle-flag.sh` |
 
----
+#### Installing oblt-cli
 
-### Installing oblt-cli
-
-#### Step 1 — Install GitHub CLI and authenticate
+**Step 1 — Install GitHub CLI and authenticate**
 
 ```bash
 brew install gh
@@ -73,7 +71,7 @@ gh auth login
 gh auth status
 ```
 
-#### Step 2 — Tap and install
+**Step 2 — Tap and install**
 
 ```bash
 export HOMEBREW_GITHUB_API_TOKEN=$(gh auth token)
@@ -87,7 +85,7 @@ Verify:
 oblt-cli --help
 ```
 
-#### Step 3 — Configure (HTTP mode)
+**Step 3 — Configure (HTTP mode)**
 
 ```bash
 oblt-cli configure --slack-channel=@<slack_member_id> --username=<github_username> --git-http-mode
@@ -97,7 +95,7 @@ oblt-cli configure --slack-channel=@<slack_member_id> --username=<github_usernam
 
 ---
 
-## Create the Cluster
+### Create the Cluster
 
 One command creates everything:
 - An ESS cluster with **Elasticsearch and Kibana**
@@ -129,7 +127,7 @@ A CI job runs (~5 minutes). When complete, **`oblt-robot-ci` sends you a Slack D
 - **Username and password** for Kibana login
 - Your cluster name (e.g. `oteldemo-ullxj`)
 
-### Once you have your cluster name — run these steps in order
+#### Once you have your cluster name
 
 **1. Initialise the cluster**
 
@@ -141,11 +139,11 @@ Pass your cluster name to `init-cluster.sh` — it configures `kubectl`, resets 
 
 This leaves your terminal free. Port-forwards run in the background.
 
-> The credentials saved to `.env` (Kibana URL, Elasticsearch URL, username, password, API key) are picked up automatically by the [Elastic Agent Skills](#ai-agent-integration), so your AI agent can query latency, error rates, logs, and service health directly against the live cluster.
+> The credentials saved to `.env` (Kibana URL, Elasticsearch URL, username, password, API key) are picked up automatically by the [Elastic Agent Skills](docs/ai-agent-integration.md), so your AI agent can query latency, error rates, logs, and service health directly against the live cluster.
 
 > **OTel Collector patch:** The upstream `oteldemo` template omits `k8sattributes` from the daemon collector's APM pipelines, so `k8s.pod.name`, `k8s.node.name`, `k8s.namespace.name`, and `container.id` are absent from all trace documents — breaking infrastructure correlation in Kibana. `init-cluster.sh` detects this and patches the `opentelemetry-kube-stack-daemon` CRD automatically. Once the upstream template is fixed, the check becomes a no-op.
 
-**2. Open the demo**
+**2. Open the demo apps**
 
 | URL | Description |
 |-----|-------------|
@@ -160,49 +158,11 @@ This leaves your terminal free. Port-forwards run in the background.
 > ./scripts/start-demo.sh
 > ```
 
-You can retrieve credentials at any time with:
-
-```bash
-oblt-cli cluster secrets credentials --cluster-name <your-cluster-name>
-```
-
-### Destroy the cluster
-
-When you're done, tear everything down (GKE cluster + ESS deployment) with:
-
-```bash
-oblt-cli cluster destroy --cluster-name <your-cluster-name>
-```
-
-> This requires an interactive terminal — type `yes` when prompted. You'll get a Slack DM when teardown is complete (~5 minutes). See [Cluster Management](#cluster-management) for more cluster commands.
-
 ---
 
-## Access the Demo
-
-### Kibana — direct URL from Slack
-
-Open the Kibana URL from the Slack message directly in your browser. No port-forwarding needed. Log in with the credentials provided.
-
-Go to **Observability** to see traces, metrics, and logs from the OTel demo flowing in.
-
-### OTel Astronomy Shop — localhost via port-forward
-
-The demo web app has no external IP. `init-cluster.sh` starts the port-forward automatically. If you need to manage it manually:
-
-```bash
-./scripts/start-demo.sh           # Start all port-forwards (idempotent)
-./scripts/start-demo.sh --status  # Check whether they are running
-./scripts/start-demo.sh --stop    # Stop all demo port-forwards
-```
-
----
-
-## Validating the Cluster in GCP
+### Validating the Cluster in GCP
 
 The `oteldemo` clusters run on GKE Autopilot in the `elastic-observability` GCP project. You can use the `gcloud` CLI to confirm your cluster exists and inspect its GCP-level configuration.
-
-### Prerequisites
 
 ```bash
 # Install gcloud if needed
@@ -212,20 +172,18 @@ brew install --cask google-cloud-sdk
 gcloud config set account <your-email>@elastic.co
 ```
 
-### Find your cluster
+**Find your cluster:**
 
 ```bash
 gcloud container clusters list --project elastic-observability | grep oteldemo
 ```
-
-You'll see your cluster alongside any others currently running in the shared project:
 
 ```
 NAME                   LOCATION     MASTER_VERSION       STATUS
 oteldemo-ullxj         us-central1  1.34.4-gke.1193000   RUNNING
 ```
 
-### Inspect cluster details
+**Inspect cluster details:**
 
 ```bash
 gcloud container clusters describe <cluster-name> \
@@ -237,13 +195,11 @@ This shows node pool configuration, machine types, autoscaling settings, and GCP
 
 ---
 
-## Managing the Kubernetes Infrastructure
+### Managing the Kubernetes Infrastructure
 
 Once `kubectl` is configured (via `oblt-cli cluster k8s`), you have full access to inspect and modify every workload in the cluster.
 
 ![kubectl get deployments](assets/kubectl-deployments.png)
-
-### Useful commands
 
 ```bash
 # List all deployments and their status
@@ -275,11 +231,31 @@ kubectl exec -it deploy/frontend -- sh
 
 ---
 
-## Triggering Failure Scenarios
+## Accessing Kibana
 
-There are two main ways to trigger failures, plus an optional infrastructure-level layer via Chaos Mesh.
+Open the Kibana URL from the Slack DM directly in your browser — no port-forwarding needed. Log in with the credentials provided.
+
+Go to **Observability** to see traces, metrics, and logs from the OTel demo flowing in.
+
+**Retrieve credentials at any time:**
+
+```bash
+oblt-cli cluster secrets credentials --cluster-name <your-cluster-name>
+```
+
+**Manage port-forwards for the demo apps:**
+
+```bash
+./scripts/start-demo.sh           # Start all port-forwards (idempotent)
+./scripts/start-demo.sh --status  # Check whether they are running
+./scripts/start-demo.sh --stop    # Stop all demo port-forwards
+```
 
 ---
+
+## Triggering Failures
+
+There are two main ways to trigger failures, plus an optional infrastructure-level layer via Chaos Mesh.
 
 ### Checking and resetting the environment
 
@@ -368,8 +344,6 @@ Use `--quiet` to hide which scenario was triggered from everyone, including your
 ./scripts/inject-failure.sh --quiet
 ```
 
----
-
 #### All commands
 
 ```bash
@@ -429,36 +403,11 @@ The active scenario is saved to `.failure-state` (gitignored) so it persists acr
 
 ---
 
-#### Checking for active failures and clearing everything
-
-Use these two commands any time — they cover **both** K8s-native faults and flagd flags, regardless of whether they were set via the script, the browser UI, or `toggle-flag.sh` directly:
-
-```bash
-# See exactly what's active right now
-./scripts/inject-failure.sh --check
-
-# Clear everything in one shot (k8s fault + all non-off flagd flags)
-./scripts/inject-failure.sh --reset-all
-```
-
-`--check` shows the K8s state file and all live flagd flag variants side by side. `--reset-all` is safe to run at any time — it tells you what it cleared, or confirms nothing needed clearing.
-
----
-
 ### Method 3: Chaos Mesh — scheduled infrastructure experiments
 
 Chaos Mesh injects infrastructure-level faults — network latency, pod kills, memory pressure, IO errors — on a repeating schedule. These are separate from the Capture the Bug pool and are applied manually.
 
-#### Access the Chaos Mesh UI
-
-`start-demo.sh` starts the Chaos Mesh port-forward automatically alongside the shop. If you need to start it manually:
-
-```bash
-./scripts/start-demo.sh           # starts both forwards (idempotent)
-./scripts/start-demo.sh --status  # check if they are running
-```
-
-Open [http://localhost:2333](http://localhost:2333) and create experiments via the UI.
+`start-demo.sh` starts the Chaos Mesh port-forward automatically. Open [http://localhost:2333](http://localhost:2333) and create experiments via the UI.
 
 Get your current namespace if you need it for manual `kubectl` commands:
 
@@ -468,9 +417,7 @@ kubectl config view --minify -o jsonpath='{..namespace}'
 
 > **Warning:** Some experiments can destabilise the cluster. Target only the specific pods you intend to affect.
 
-#### Apply a pre-built manifest
-
-Pre-built experiment manifests are in `chaos-mesh/`. Replace `MY_NAMESPACE` with your cluster namespace before applying.
+**Pre-built experiment manifests** are in `chaos-mesh/`. Replace `MY_NAMESPACE` with your cluster namespace before applying.
 
 | Manifest | Effect |
 |----------|--------|
@@ -480,25 +427,21 @@ Pre-built experiment manifests are in `chaos-mesh/`. Replace `MY_NAMESPACE` with
 | `chaos-mesh/io-error-frontend.yaml` | 99% IO fault rate on frontend every 2 min for 90s |
 
 ```bash
-# Apply
-kubectl apply -f chaos-mesh/network-delay-frontend.yaml
-
-# Remove
-kubectl delete -f chaos-mesh/network-delay-frontend.yaml
+kubectl apply -f chaos-mesh/network-delay-frontend.yaml   # Apply
+kubectl delete -f chaos-mesh/network-delay-frontend.yaml  # Remove
 ```
 
 ---
 
-## Failure Scenario Catalogue
+### Failure Scenario Catalogue
 
 Full details for every scenario — flagd flags (variants, affected services, Kibana paths, toggle commands) and K8s-native faults (kubectl investigation steps, root cause, revert procedure) — are in **[docs/failure-scenarios.md](docs/failure-scenarios.md)**.
 
+---
 
 ## FAQ
 
 **Q: How do I check if any failures are currently active?**
-
-Run this one command — it checks both K8s-native faults and flagd flags in one shot, regardless of how they were triggered (script, browser UI, or direct `kubectl`):
 
 ```bash
 ./scripts/inject-failure.sh --check
@@ -506,7 +449,7 @@ Run this one command — it checks both K8s-native faults and flagd flags in one
 
 ---
 
-**Q: Something looks broken in the demo. How do I reset everything to a clean state?**
+**Q: Something looks broken. How do I reset everything to a clean state?**
 
 ```bash
 ./scripts/inject-failure.sh --reset-all
@@ -516,9 +459,7 @@ This reverts any active K8s fault (scaled deployments, bad env vars, CPU/memory 
 
 ---
 
-**Q: I turned on a flagd flag via the browser UI at `localhost:8080/feature`. How do I turn it off?**
-
-Either toggle it off in the same UI, or run:
+**Q: I turned on a flagd flag via the browser UI. How do I turn it off?**
 
 ```bash
 ./scripts/toggle-flag.sh --status          # see what's on
@@ -530,31 +471,14 @@ The browser UI and the scripts both write to the same ConfigMap — they are int
 
 ---
 
-**Q: The demo website (`localhost:8080`) isn't loading or is behaving strangely. Where do I start?**
-
-First check whether a failure was left active:
+**Q: The demo website (`localhost:8080`) isn't loading. Where do I start?**
 
 ```bash
-./scripts/inject-failure.sh --check
-```
-
-If something is active, clear it:
-
-```bash
-./scripts/inject-failure.sh --reset-all
-```
-
-If the site is still broken after a reset, the port-forward may have dropped. Restart it:
-
-```bash
-./scripts/start-demo.sh
-```
-
-If pods are crashing, check overall cluster health:
-
-```bash
-kubectl get pods          # look for CrashLoopBackOff, Error, OOMKilled
-kubectl get deployments   # look for 0/1 READY
+./scripts/inject-failure.sh --check   # check for active failures
+./scripts/inject-failure.sh --reset-all  # clear if needed
+./scripts/start-demo.sh               # restart port-forwards if still broken
+kubectl get pods                      # look for CrashLoopBackOff, OOMKilled
+kubectl get deployments               # look for 0/1 READY
 ```
 
 ---
@@ -563,23 +487,21 @@ kubectl get deployments   # look for 0/1 READY
 
 | Command | What it does |
 |---------|-------------|
-| `--revert` | Reverts the single scenario that was injected via `inject-failure.sh`, then reveals what it was. Won't touch flags set via the browser UI or `toggle-flag.sh` directly. |
-| `--reset-all` | Clears everything — the k8s state file AND every non-off flagd flag, regardless of how they were set. Use this when you're not sure what's active. |
+| `--revert` | Reverts the single scenario injected via `inject-failure.sh`. Won't touch flags set via the browser UI or `toggle-flag.sh` directly. |
+| `--reset-all` | Clears everything — the k8s state file AND every non-off flagd flag, regardless of how they were set. |
 
 ---
 
-**Q: I injected a scenario but I've forgotten which one. How do I find out?**
+**Q: I injected a scenario but I've forgotten which one.**
 
 ```bash
-./scripts/inject-failure.sh --status   # vague symptom hint (safe to share with a participant)
+./scripts/inject-failure.sh --status   # vague symptom hint (safe to share)
 ./scripts/inject-failure.sh --reveal   # full answer + root cause + Kibana path
 ```
 
 ---
 
 **Q: Can I inject a specific failure rather than a random one?**
-
-Yes. List the available scenarios and pick one by ID:
 
 ```bash
 ./scripts/inject-failure.sh --list
@@ -588,17 +510,12 @@ Yes. List the available scenarios and pick one by ID:
 
 ---
 
-**Q: The demo was working yesterday but now `localhost:8080` is timing out. Nothing is shown as active.**
+**Q: `localhost:8080` is timing out. Nothing is shown as active.**
 
-The port-forward process dies when your laptop sleeps or the terminal is closed. Restart it:
+The port-forward dies when your laptop sleeps or the terminal closes. Restart it:
 
 ```bash
 ./scripts/start-demo.sh
-```
-
-Check it's running:
-
-```bash
 ./scripts/start-demo.sh --status
 ```
 
@@ -606,45 +523,27 @@ Check it's running:
 
 **Q: How do I tell whether I'm looking at a flagd failure or a K8s infrastructure failure?**
 
-- **flagd failures** are application-layer — the pods are all Running/Ready, errors come from the app logic. Check with `./scripts/toggle-flag.sh --status`.
-- **K8s failures** affect infrastructure — pods may be in `CrashLoopBackOff`, `OOMKilled`, or scaled to 0. Check with `kubectl get pods` and `kubectl get deployments`.
+- **flagd** — pods are Running/Ready, errors come from app logic. Check with `./scripts/toggle-flag.sh --status`.
+- **K8s** — pods may be `CrashLoopBackOff`, `OOMKilled`, or scaled to 0. Check with `kubectl get pods`.
 - Run `./scripts/inject-failure.sh --check` to see both at once.
 
 ---
 
-## Cluster Management
-
-### Retrieve credentials
-
-If you need to log back into Kibana or Elasticsearch, fetch your credentials at any time:
+**Q: How do I retrieve my credentials or destroy the cluster?**
 
 ```bash
+# Retrieve credentials
 oblt-cli cluster secrets credentials --cluster-name <cluster-name>
-```
 
-### Retrieve Kibana config
-
-Downloads a sample `kibana.yml` pre-configured for your cluster — useful if you want to run a local Kibana instance pointing at the ESS deployment:
-
-```bash
+# Download a kibana.yml pre-configured for your cluster
 oblt-cli cluster secrets kibana-config --cluster-name <cluster-name>
-```
 
-### Destroy the cluster
-
-Tears down both the GKE Kubernetes cluster and the ESS (Elasticsearch + Kibana) deployment. You'll get a Slack DM when it's done (~5 minutes).
-
-```bash
+# Tear down the GKE cluster + ESS deployment (~5 min, Slack DM on completion)
 oblt-cli cluster destroy --cluster-name <cluster-name>
+./scripts/teardown.sh <cluster-name>   # alternative with confirmation prompt
 ```
 
-> `oblt-cli` requires an interactive terminal for the confirmation prompt — it cannot be piped. Type `yes` when asked.
-
-You can also use the helper script (which prompts for confirmation first):
-
-```bash
-./scripts/teardown.sh <cluster-name>
-```
+> `oblt-cli cluster destroy` requires an interactive terminal — type `yes` when prompted.
 
 ---
 
@@ -653,6 +552,8 @@ You can also use the helper script (which prompts for confirmation first):
 - [OpenTelemetry Demo documentation](https://opentelemetry.io/docs/demo/)
 - [Feature flag reference](https://opentelemetry.io/docs/demo/feature-flags/)
 - [Recommendation cache failure walkthrough](https://opentelemetry.io/docs/demo/feature-flags/recommendation-cache/)
+- [Failure Scenario Catalogue](docs/failure-scenarios.md)
+- [AI Agent Skills](docs/ai-agent-integration.md)
 - [oblt-cli internal docs](https://studious-disco-k66oojq.pages.github.io/tools/oblt-cli/)
 - [oblt failure scenarios internal docs](https://studious-disco-k66oojq.pages.github.io/opentelemetry/failure-scenarios/)
 - [Chaos Mesh documentation](https://chaos-mesh.org/docs/)

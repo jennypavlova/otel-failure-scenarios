@@ -28,7 +28,7 @@ The repo also includes [Elastic Agent Skills](docs/ai-agent-integration.md) so A
 
 ## Architecture
 
-<img width="3528" height="1707" alt="image" src="https://github.com/user-attachments/assets/cd4fe703-1e73-4297-bd25-247859f9c412" />
+<img width="3528" height="1707" alt="image" src="https://github.com/user-attachments/assets/5523c070-11e1-4897-8663-bfac8207bd4c" />
 
 ---
 

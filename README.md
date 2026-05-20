@@ -10,10 +10,15 @@ The repo also includes [Elastic Agent Skills](docs/ai-agent-integration.md) so A
 
 ### Why should I use it?
 
-- **Real infrastructure failures** — reproduce failure modes that don't exist locally: CPU saturation, OOMKills, pod eviction, and network policy faults on a live GKE cluster
-- **Signal-selective testing** — mute logs, metrics, or traces individually to simulate environments that only send a subset of signals, and test how well your dashboards and alerts hold up
+- **Real infrastructure failures** — reproduce failure modes that don't exist locally: CPU saturation, OOMKills, pod eviction, and network policy faults on a live GKE cluster. See [Triggering Failures](#triggering-failures).
+
+- **Signal-selective testing** — mute logs, metrics, or traces individually to simulate environments that only send a subset of signals, and test how well your dashboards and alerts hold up. See [Controlling which signals are sent](#controlling-which-signals-are-sent).
+
 - **Full cluster access** — inspect nodes, pods, and workloads with [`kubectl`](https://kubernetes.io/docs/tasks/tools/) and [`gcloud`](https://cloud.google.com/sdk/gcloud), just as you would in production
+
 - **AI-proof scenarios** — the [K8s-native faults](docs/failure-scenarios.md) go beyond [flagd](https://flagd.dev) presets that are already in AI training data; they look like real production incidents and require genuine investigation through APM, logs, and infrastructure metrics to diagnose
+
+- **Extensible scenario library** — use the [`create-failure-scenario` skill](.agents/skills/create-failure-scenario/SKILL.md) to author and validate new K8s-native failures end-to-end: baseline capture, injection, Elasticsearch verification, revert, and registration — all in one guided workflow. See [Contributing failure scenarios](#contributing-failure-scenarios).
 
 ![OTel Demo Overview](assets/overview.png)
 
@@ -47,6 +52,7 @@ The repo also includes [Elastic Agent Skills](docs/ai-agent-integration.md) so A
   - [Method 3: Chaos Mesh — scheduled infrastructure experiments](#method-3-chaos-mesh--scheduled-infrastructure-experiments)
   - [Controlling which signals are sent](#controlling-which-signals-are-sent)
   - [Failure Scenario Catalogue](docs/failure-scenarios.md)
+  - [Contributing failure scenarios](#contributing-failure-scenarios)
 - [FAQ](#faq)
 - [Reference](#reference)
 
@@ -400,6 +406,8 @@ flagd failures are well-documented in the official OpenTelemetry Demo documentat
 | `chaos-net-delay-checkout` | CPU limit `2m` added to checkout | VPA rightsizing tool sampled during quiet window; PR approved without understanding millicores | APM → checkout latency spike, error rate flat; `kubectl top` shows CPU throttled |
 | `chaos-net-loss-payment` | Memory limit lowered to `25Mi` | Memory-audit PR set limit below Node.js runtime overhead | kubectl → payment pod OOMKilled repeatedly, bursty payment errors in APM |
 | `chaos-cpu-stress-frontend` | CPU limit `5m` added to frontend | Platform script had unit conversion bug — wrote `5m` instead of `500m` | APM → all frontend transactions uniformly slower; `kubectl top` shows CPU at limit |
+| `chaos-pod-fail-productcatalog` | `product-catalog` deployment scaled to 0 replicas | Weekend cost-reduction automation identified catalog as "low-utilization" during off-hours and zeroed replicas | APM → product-catalog dark, frontend error rate spikes to 50–60% |
+| `chaos-db-fail-productcatalog` | `DB_CONNECTION_STRING` env var set to a non-existent PostgreSQL hostname | Database migration PR used wrong hostname — CI passed because the string is only validated at runtime | kubectl → product-catalog in CrashLoopBackOff, frontend error rate 30–57% |
 
 The active scenario is saved to `.failure-state` (gitignored) so it persists across terminal sessions. Running `--revert` always tells you what was active, even if the session was started by someone else.
 
@@ -461,6 +469,24 @@ Useful for demos where you want to show Kibana behaviour when a signal goes miss
 ### Failure Scenario Catalogue
 
 Full details for every scenario — flagd flags (variants, affected services, Kibana paths, toggle commands) and K8s-native faults (kubectl investigation steps, root cause, revert procedure) — are in **[docs/failure-scenarios.md](docs/failure-scenarios.md)**.
+
+---
+
+### Contributing failure scenarios
+
+The `create-failure-scenario` [Agent Skill](.agents/skills/create-failure-scenario/SKILL.md) automates the full lifecycle of authoring and validating a new K8s-native scenario. Ask your AI agent (Cursor, GitHub Copilot, Windsurf, etc.) to use it:
+
+> "Use the create-failure-scenario skill to add a new failure scenario"
+
+The skill will:
+
+1. Check existing scenarios to avoid duplicating coverage
+2. Ask if you have a specific service or fault type in mind (or auto-propose one)
+3. Capture a RED metrics baseline from Elasticsearch
+4. Write `inject.sh` and `revert.sh` under `k8s-faults/scenarios/`
+5. Apply the fault, verify it with `kubectl`, and confirm symptoms appear in Elasticsearch
+6. Revert the fault and confirm recovery
+7. Register the scenario in `scripts/inject-failure.sh` and `docs/failure-scenarios.md` with a verified test run table
 
 ---
 

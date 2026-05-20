@@ -279,6 +279,90 @@ NAMESPACE=$(kubectl config view --minify -o jsonpath='{..namespace}') \
 
 ---
 
+### Product Catalog Bad Database Config (`chaos-db-fail-productcatalog`)
+
+| Field | Value |
+|-------|-------|
+| **Scenario ID** | `chaos-db-fail-productcatalog` |
+| **Fault folder** | `k8s-faults/scenarios/ctb-productcatalog-bad-db` |
+| **What breaks** | `DB_CONNECTION_STRING` env var on `product-catalog` deployment set to a non-existent PostgreSQL hostname |
+| **Realistic story** | A database migration PR updated `DB_CONNECTION_STRING` to point at the new PostgreSQL instance but the target hostname was a typo — `postgresql-broken` instead of `postgresql`. The deployment rolled out without failing (the connection string is only validated at runtime, not at deploy time), so CI was green. The app calls `pg.Connect()` at startup, DNS resolution fails for the non-existent hostname, and the process exits immediately with code 1. |
+| **Symptoms** | All product browsing fails immediately with errors. The product-catalog pod is in CrashLoopBackOff — it starts, crashes within one second, and loops. It never stays up long enough to serve a single request. The frontend error rate climbs to 30–57% of all transactions because product-catalog is a critical dependency for every product listing and detail page. Unlike scale-to-zero, the pod exists and keeps restarting — a misleading signal for responders who check pod existence. |
+| **Root cause** | The Go service calls `pg.Connect()` at startup. DNS resolution fails for the bad hostname, the connection times out, and the process exits with code 1. Kubernetes restarts it with exponential backoff. The pod never becomes Ready. |
+| **Kibana** | APM → Services → product-catalog — zero throughput (pod never runs long enough to serve). APM → Service Map — frontend → product-catalog edge shows errors. APM → Services → frontend — error rate spike across all product-related transactions. Infrastructure → Kubernetes → Pods — product-catalog shows CrashLoopBackOff with climbing RESTARTS. |
+
+**kubectl investigation:**
+
+```bash
+# CrashLoopBackOff immediately visible
+kubectl get pods -n <namespace> -l app.kubernetes.io/component=product-catalog
+# → STATUS: CrashLoopBackOff, RESTARTS: climbing
+
+# Confirm the runtime is less than 2 seconds — it crashes immediately on startup
+kubectl describe pod -n <namespace> -l app.kubernetes.io/component=product-catalog
+# → Last State: Terminated, Reason: Error, Exit Code: 1
+# → Started and Finished timestamps are within 1–2 seconds of each other
+
+# Find the bad env var
+kubectl get deployment product-catalog -n <namespace> -o yaml | grep DB_CONNECTION_STRING
+# → DB_CONNECTION_STRING: postgres://otelu:otelp@postgresql-broken/otel?sslmode=disable
+```
+
+The tell: CrashLoopBackOff with a sub-second runtime (Started/Finished within 2 seconds in `kubectl describe`) combined with `DB_CONNECTION_STRING` pointing to an unresolvable hostname. This is a config problem, not a network problem — the pod starts, fails DNS, and exits before serving a single request.
+
+**Verified test run (2026-05-20):**
+
+| Phase | product-catalog: req/min | errors | error% | frontend: req/min | frontend: errors | frontend: error% |
+|-------|--------------------------|--------|--------|-------------------|------------------|-----------------|
+| Baseline (13:53–13:55 UTC) | 108–200 | 0 | 0% | 241–379 | 0 | 0% |
+| Post-injection (13:56–14:01 UTC) | 0 | 0 | — (pod dark) | 142–279 | 47–158 | **30–57%** |
+| Post-revert (14:02–14:04 UTC) | 74–108 | 0 | 0% | 261–279 | 0–4 | **0–1.5%** |
+
+K8s observation: injection set `DB_CONNECTION_STRING=postgres://otelu:otelp@postgresql-broken/otel?sslmode=disable`; pod entered CrashLoopBackOff immediately, reaching 4 restarts within 2 minutes, with each run lasting under 1 second (exit code 1). The product-catalog service disappeared from APM within one minute of injection. Caller signal: the `frontend` service error rate climbed from 0% baseline to **57% peak** as all product gRPC calls returned unavailable. Post-revert: `kubectl set env` restored the correct hostname, pod was `1/1 Running` within 6 seconds; frontend error rate dropped from 55% → 11.5% → 1.5% → 0% within 3 minutes.
+
+---
+
+### Product Catalog Scaled to Zero (`chaos-pod-fail-productcatalog`)
+
+| Field | Value |
+|-------|-------|
+| **Scenario ID** | `chaos-pod-fail-productcatalog` |
+| **Fault folder** | `k8s-faults/scenarios/ctb-productcatalog-scaled-zero` |
+| **What breaks** | `product-catalog` deployment replica count set to `0` |
+| **Realistic story** | A weekend cost-reduction automation script identified the product catalog service as "low-utilization" during off-hours (European evening, low US traffic) and scaled its replicas to zero. The script compared absolute request counts against a static threshold — it failed to account for the fact that low traffic reflected time-of-day, not genuine idleness. The change was committed through GitOps automation and approved without review of the replica-count diffs. |
+| **Symptoms** | All product browsing fails immediately. The frontend's gRPC calls to the product-catalog service return UNAVAILABLE. The frontend error rate spikes to ~50–60% — every product listing, product detail, and search page fails because the product catalog is a critical synchronous dependency. The `product-catalog` deployment exists but has 0 replicas. |
+| **Root cause** | No product-catalog pods are running — there is nothing to serve product catalog requests. Kubernetes does not auto-recover from a manual replica scale-down. |
+| **Kibana** | APM → Services → product-catalog — no recent throughput (service went dark). APM → Service Map — frontend → product-catalog edge shows errors. APM → Services → frontend — sharp error rate spike across all product-related transactions. Infrastructure → Kubernetes → Pods — no pods for product-catalog selector. |
+
+**kubectl investigation:**
+
+```bash
+# No pods running
+kubectl get deployment product-catalog -n <namespace>
+# → READY shows 0/0
+
+kubectl get pods -n <namespace> -l app.kubernetes.io/component=product-catalog
+# → No resources found
+
+# The deployment still exists — only replicas is wrong
+kubectl get deployment product-catalog -n <namespace> -o yaml | grep replicas
+# → replicas: 0
+```
+
+The tell: `kubectl get deployment product-catalog` shows `READY 0/0`. No pods means no traffic can be served. The fix is `kubectl scale deployment product-catalog --replicas=1`.
+
+**Verified test run (2026-05-20):**
+
+| Phase | product-catalog: req/min | errors | error% | p99 (ms) | frontend: error% |
+|-------|--------------------------|--------|--------|----------|-----------------|
+| Baseline (13:33–13:37 UTC) | 97–152 | 3–9 | 2–6% | 26–45 | 5–10% |
+| Post-injection (13:39–13:43 UTC) | 0 | 0 | — (no pods) | — | **43–58%** |
+| Post-revert (13:45–13:46 UTC) | 96–110 | 0 | 0% | 40–46 | **0%** |
+
+K8s observation: injection set `replicas: 0` — `kubectl get deployment product-catalog` showed `READY 0/0` immediately; the pod selector returned no resources within 2 seconds. The `product-catalog` service disappeared from APM traces after the last in-flight requests drained (~13:38). Caller signal: the `frontend` service saw its error rate climb from a baseline of ~5–10% to **57% peak** as product catalog gRPC calls returned UNAVAILABLE. Post-revert: `kubectl scale` restored `replicas: 1`, pod was `1/1 Running` within 12 seconds; frontend error rate dropped from 55% → 21% → 0% within 2 minutes.
+
+---
+
 ### Recommendation Scaled to Zero (`chaos-pod-fail-recommendation`)
 
 | Field | Value |

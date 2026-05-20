@@ -241,6 +241,46 @@ calls fail; between restarts they succeed. Root cause: kubectl describe pod \
 under Limits. kubectl get events shows OOMKilling events.|\
 kubectl get pods — payment pod RESTARTS count is elevated. kubectl describe pod <payment-pod> — Last State OOMKilled, Limits memory 25Mi. APM → Services → payment — bursty intermittent errors coinciding with pod restarts"
 
+  "chaos-pod-fail-productcatalog|k8s-fault|k8s-faults/scenarios/ctb-productcatalog-scaled-zero|-|\
+Product browsing is completely broken — the entire shop catalogue is unavailable \
+and no products can be viewed or loaded.|\
+All product listing and product detail pages fail. The frontend's gRPC calls to the \
+product-catalog service return UNAVAILABLE immediately. The product-catalog deployment \
+exists but has 0 replicas — kubectl get deployment product-catalog shows READY 0/0 \
+and no pods are listed for the product-catalog selector. The frontend error rate \
+spikes sharply: roughly 50–60% of all frontend transactions fail because the product \
+catalog is the critical dependency for browsing, listing, and loading any product.|\
+A weekend cost-reduction automation script identified product-catalog as \
+"low-utilization" during off-hours (European evening, low US traffic) and set its \
+replica count to 0. The script calculated utilization using absolute request counts \
+against a static threshold — it failed to account for the fact that low traffic \
+reflected time-of-day, not genuine idleness. The automation committed through GitOps \
+and was approved without review of the replica-count diffs. Root cause: \
+kubectl get deployment product-catalog shows replicas: 0. \
+kubectl get pods -l app.kubernetes.io/component=product-catalog returns \
+no resources — there is nothing to serve product catalog requests.|\
+kubectl get deployment product-catalog — READY 0/0, replicas 0. kubectl get pods -l app.kubernetes.io/component=product-catalog — no resources found. APM → Service Map — frontend to product-catalog edge shows errors. APM → Services → frontend — error rate spike on all product-related transactions"
+
+  "chaos-db-fail-productcatalog|k8s-fault|k8s-faults/scenarios/ctb-productcatalog-bad-db|-|\
+The product catalogue is completely broken — all product pages and listings are \
+returning errors. The pod looks like it might be starting up, but nothing is serving.|\
+All product browsing fails immediately with errors. The product-catalog pod is in \
+CrashLoopBackOff — it starts, crashes within one second, and loops. kubectl logs \
+shows a fatal database connection error at startup. Unlike a scale-to-zero scenario \
+the pod exists and keeps restarting, but it never stays up long enough to serve a \
+request. The frontend error rate spikes to 30–57%% of all transactions because \
+product-catalog is the critical dependency for every browsing and listing operation.|\
+A database migration PR updated DB_CONNECTION_STRING to point at the new PostgreSQL \
+instance (postgresql-new) but the target hostname was a typo — the correct name is \
+postgresql. The deployment rolled out without failing (the env var is only validated \
+at runtime, not at deploy time), so CI was green. The app calls pg.Connect() at \
+startup, DNS resolution fails for the non-existent hostname, and the process exits \
+with code 1. Kubernetes restarts it with exponential backoff. Root cause: \
+kubectl get deployment product-catalog -o yaml shows \
+DB_CONNECTION_STRING pointing to postgresql-broken. kubectl get pods shows \
+CrashLoopBackOff with RESTARTS climbing.|\
+kubectl get pods -l app.kubernetes.io/component=product-catalog — STATUS CrashLoopBackOff, RESTARTS climbing. kubectl describe pod <product-catalog-pod> — Last State Terminated, Exit Code 1, runtime < 2 seconds. kubectl get deployment product-catalog -o yaml — DB_CONNECTION_STRING set to non-existent hostname. APM → Services → product-catalog — zero throughput (pod never runs). APM → Services → frontend — error rate spike on all product-related transactions"
+
   "chaos-pod-fail-recommendation|k8s-fault|k8s-faults/scenarios/ctb-recommendation-scaled-zero|-|\
 Product pages are completely broken — they time out and never load. The \
 recommendation service has no running pods.|\

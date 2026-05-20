@@ -24,43 +24,7 @@ The repo also includes [Elastic Agent Skills](docs/ai-agent-integration.md) so A
 
 ## Architecture
 
-```mermaid
-flowchart LR
-  subgraph local [Local Machine]
-    Browser
-    kubectl
-    gcloud
-    Agent["AI Agent"]
-  end
-
-  subgraph gcp [GCP / us-central1]
-    subgraph gke [GKE Autopilot Cluster]
-      Shop["OTel Astronomy Shop\n17 microservices"]
-      Flagd["flagd"]
-      ChaosMesh["Chaos Mesh"]
-      OtelCol["OTel Collectors"]
-    end
-
-    subgraph elasticcloud ["Elastic Cloud (managed by Elastic)"]
-      ES["Elasticsearch"]
-      Kibana["Kibana"]
-      Kibana --- ES
-    end
-  end
-
-  Shop -->|OTLP| OtelCol
-  Flagd -->|OTLP| OtelCol
-  OtelCol -->|"traces, metrics, logs"| ES
-
-  Browser -->|"localhost:8080 (port-forward)"| Shop
-  Browser -->|"localhost:8080/feature (port-forward)"| Flagd
-  Browser -->|"localhost:2333 (port-forward)"| ChaosMesh
-  Browser -->|"direct URL"| Kibana
-  kubectl -->|"get / logs / apply"| gke
-  gcloud -->|"clusters / nodes"| gcp
-  Agent -->|"ES QL / REST"| ES
-  Agent -->|"Kibana API"| Kibana
-```
+<img width="3528" height="1707" alt="image" src="https://github.com/user-attachments/assets/cd4fe703-1e73-4297-bd25-247859f9c412" />
 
 ---
 

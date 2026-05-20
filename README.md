@@ -1,8 +1,14 @@
 # OTel Failure Scenarios
 
-Provision the [OpenTelemetry Astronomy Shop](https://github.com/open-telemetry/opentelemetry-demo) running on a GKE Autopilot cluster and sending data to an Elastic Cloud (ESS) cluster. Trigger failure scenarios via flagd (application-layer flags), realistic K8s-native faults (bad deployments, config changes, resource limits), or [Chaos Mesh](https://chaos-mesh.org/) (scheduled infrastructure experiments) — then analyse the results in Kibana.
+Provision the [OpenTelemetry Astronomy Shop](https://github.com/open-telemetry/opentelemetry-demo) — a realistic 17-service microservices application — on a [GKE Autopilot](https://cloud.google.com/kubernetes-engine/docs/concepts/autopilot-overview) cluster in Google Cloud, with telemetry flowing into an [Elastic Cloud](https://www.elastic.co/cloud) cluster. Then inject [failure scenarios](docs/failure-scenarios.md) and analyse the results in Kibana.
 
-> This project was designed based on guidance from the [Elastic Observability Test Environments — OpenTelemetry Quick Start](https://studious-disco-k66oojq.pages.github.io/user-guide/opentelemetry-quick-start/#create-a-opentelemetry-demo-cluster).
+Running on real Kubernetes infrastructure in GCP means you can reproduce failure modes that simply don't exist on a local machine: genuine CPU saturation, memory pressure, pod eviction, network policies, and OOMKills. You can inspect the live cluster with [`kubectl`](https://kubernetes.io/docs/tasks/tools/) and [`gcloud`](https://cloud.google.com/sdk/gcloud), just as you would in production.
+
+The [failure scenarios](docs/failure-scenarios.md) go beyond the [flagd](https://flagd.dev) preset failures built into the OTel demo — those are well-documented and likely already in AI training data, meaning an AI agent can identify them by name without genuinely diagnosing anything. The K8s-native faults here look like real production incidents (misconfigured resource limits, bad deployments, broken service selectors), requiring actual investigation through APM, logs, and infrastructure metrics to find the root cause.
+
+The repo also includes [Elastic Agent Skills](docs/ai-agent-integration.md) so AI coding agents (Cursor, GitHub Copilot, Windsurf, and more) can query the live cluster directly — querying latency, error rates, service dependencies, and logs — without any manual credential setup.
+
+> Based on guidance from the [Elastic Observability Test Environments — OpenTelemetry Quick Start](https://studious-disco-k66oojq.pages.github.io/user-guide/opentelemetry-quick-start/#create-a-opentelemetry-demo-cluster).
 
 ![OTel Demo Overview](assets/overview.png)
 
@@ -58,26 +64,10 @@ flowchart LR
 
 ---
 
-## AI Agent Integration
-
-This repo includes [Elastic Agent Skills](https://github.com/elastic/agent-skills) for AI coding agents (Cursor, GitHub Copilot, Windsurf, and more). When you run `./scripts/init-cluster.sh`, your agent can query the live cluster directly — no manual credential setup needed. See [docs/ai-agent-integration.md](docs/ai-agent-integration.md) for the full list of installed skills.
-
----
-
-## Why this over running the OTel demo locally?
-
-- **Cloud-hosted infrastructure** — your laptop will struggle to run a 20-service Kubernetes cluster under load; GKE Autopilot scales automatically
-- **Realistic K8s-native infrastructure faults** — inject failures that look like real production incidents (misconfigured resource limits, NetworkPolicy mistakes, Service selector mismatches); the flagd scenarios are in the OTel demo docs and likely in model training data, so agents can identify them by name without actually diagnosing anything
-- **Real GCP infrastructure** — inspect nodes, pods, and networking in the GCP console or with `gcloud`, not just in a local Docker environment
-- **Full `kubectl` access** — manage deployments, inspect logs, and apply manifests against a real cluster just as you would in production
-
----
-
 ## Table of Contents
 
 - [Use cases](#use-cases)
 - [Architecture](#architecture)
-- [AI Agent Integration](docs/ai-agent-integration.md)
 - [Prerequisites](#prerequisites)
   - [Installing oblt-cli](#installing-oblt-cli)
 - [Create the Cluster](#create-the-cluster)

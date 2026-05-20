@@ -402,6 +402,17 @@ kubectl get pod -n <namespace> -l app.kubernetes.io/component=frontend
 
 The tell: `resources.limits.cpu: 5m` in the frontend deployment. Uniform latency increase across all endpoints (not a single slow one) confirms resource contention rather than a code bug or service dependency issue.
 
+**Verified test run (2026-05-20):**
+
+| Phase | frontend: req/min | p99 (ms) | avg (ms) | error% |
+|-------|-------------------|----------|----------|--------|
+| Baseline (08:52–09:01 UTC) | 180–380 | 19–447 | 8–35 | 2–15% |
+| Throttled — 09:05 UTC | 5 | **41,368** | **36,680** | 0% |
+| Throttled — 09:06 UTC | 14 | **172,060** | **26,229** | 0% |
+| Post-revert (09:09–09:12 UTC) | 158–277 | 115–497 | 19–45 | 7–9% |
+
+K8s observation: injection set `resources.limits.cpu: 5m`; `kubectl top` showed pod consuming **10–11m** CPU against a **5m** cap — throttled to ~50% of demand. Pod remained `Running/Ready` throughout (`1/1`). Revert removed the CPU limit entirely (`kubectl patch` JSON patch op `remove`), rollout completed in ~4 seconds. Post-revert throughput and p99 recovered to baseline within one per-minute bucket.
+
 ---
 
 ### Payment OOMKill Restart Loop (`chaos-net-loss-payment`)
@@ -433,3 +444,14 @@ kubectl get deployment payment -n <namespace> -o yaml | grep -A5 resources
 ```
 
 The tell: `Last State: Terminated / Reason: OOMKilled` in `kubectl describe pod`. `resources.limits.memory: 25Mi` confirms the root cause — payment uses ~100Mi at runtime, far above the limit.
+
+**Verified test run (2026-05-20):**
+
+| Phase | payment (total / errors / error%) | checkout (total / errors / error%) |
+|-------|-----------------------------------|-------------------------------------|
+| Baseline (last 15 min pre-injection) | 62 / 0 / 0% — p99 53 ms | 490 / 30 / 6.1% — p99 134 ms |
+| Post-injection peak (08:48 UTC) | ~1–2 spans/min (pod cycling) | 28 / 8 / **28.6%** — p99 746 ms |
+| Post-injection (08:49 UTC) | near-zero | 18 / 4 / **22.2%** |
+| Post-revert (08:54 UTC) | 5 / 0 / 0% — normal volume | 12 / 0 / **0%** |
+
+K8s observation: pod reached `OOMKilled` state 4 times within the first 2 minutes after injection (exit code 137). `kubectl rollout status` confirmed clean recovery within 4 seconds of revert.

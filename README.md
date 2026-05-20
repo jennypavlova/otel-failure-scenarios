@@ -4,7 +4,7 @@
 
 ### What is this?
 
-This repo provisions [OpenTelemetry Astronomy Shop](https://github.com/open-telemetry/opentelemetry-demo) — a realistic 17-service microservices application — on a [GKE Autopilot](https://cloud.google.com/kubernetes-engine/docs/concepts/autopilot-overview) cluster in Google Cloud, with telemetry flowing into an [Elastic Cloud](https://www.elastic.co/cloud) cluster. It allows you to inject [failure scenarios](docs/failure-scenarios.md) and analyse the results in Kibana.
+This repo provisions [OpenTelemetry Astronomy Shop](https://github.com/open-telemetry/opentelemetry-demo) — a realistic 17-service microservices application — on a [GKE Autopilot](https://cloud.google.com/kubernetes-engine/docs/concepts/autopilot-overview) cluster in Google Cloud, with telemetry flowing into an [Elastic Cloud](https://www.elastic.co/cloud) cluster. It allows you to inject [failure scenarios](docs/failure-scenarios.md) and analyse the results in Kibana. You can also [control which signals (logs, metrics, traces, or any combination) reach Elasticsearch](#controlling-which-signals-are-sent) — useful for demos that show Kibana's behaviour when a signal type goes missing.
 
 The repo also includes [Elastic Agent Skills](docs/ai-agent-integration.md) so AI coding agents (Cursor, GitHub Copilot, Windsurf, and more) can query the live cluster directly — querying latency, error rates, service dependencies, and logs — without any manual credential setup.
 
@@ -44,6 +44,7 @@ The repo also includes [Elastic Agent Skills](docs/ai-agent-integration.md) so A
   - [Method 1: flagd — controlled failures](#method-1-flagd--controlled-failures)
   - [Method 2: Capture the Bug — random injection](#method-2-capture-the-bug--random-injection)
   - [Method 3: Chaos Mesh — scheduled infrastructure experiments](#method-3-chaos-mesh--scheduled-infrastructure-experiments)
+  - [Controlling which signals are sent](#controlling-which-signals-are-sent)
   - [Failure Scenario Catalogue](docs/failure-scenarios.md)
 - [FAQ](#faq)
 - [Reference](#reference)
@@ -430,6 +431,29 @@ kubectl config view --minify -o jsonpath='{..namespace}'
 kubectl apply -f chaos-mesh/network-delay-frontend.yaml   # Apply
 kubectl delete -f chaos-mesh/network-delay-frontend.yaml  # Remove
 ```
+
+---
+
+### Controlling which signals are sent
+
+`toggle-signals.sh` lets you stop or resume individual OTel signal types (traces, logs, or metrics) flowing into Elasticsearch. It works by patching the gateway collector CRD to inject a drop-all filter processor — no state file, the CRD itself is the source of truth.
+
+```bash
+# See which signals are currently enabled or disabled
+./scripts/toggle-signals.sh --status
+
+# Stop a signal from reaching Elasticsearch
+./scripts/toggle-signals.sh --disable=traces
+./scripts/toggle-signals.sh --disable=logs,metrics
+
+# Resume a signal
+./scripts/toggle-signals.sh --enable=traces
+
+# Re-enable all three signals at once
+./scripts/toggle-signals.sh --reset
+```
+
+Useful for demos where you want to show Kibana behaviour when a signal goes missing — for example, muting metrics to demonstrate the infra correlation gap, or muting logs to show how log-only alerting fails silently.
 
 ---
 

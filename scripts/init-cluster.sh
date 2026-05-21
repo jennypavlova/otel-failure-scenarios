@@ -125,19 +125,12 @@ fi
 
 echo ""
 
-# ── 3. Ensure OTel daemon collector has k8sattributes in APM pipelines ────────
-# App services send OTLP to the daemon collector, which forwards to the gateway
-# via the traces/apm and logs/apm pipelines. The upstream oteldemo template
-# omits k8sattributes from these pipelines, so k8s.pod.name, k8s.node.name,
-# k8s.namespace.name, and container.id are absent from every trace document —
-# breaking infrastructure correlation in Kibana.
-#
-# The fix adds k8sattributes/apm (cluster-wide, no per-node filter) to the
-# traces/apm and logs/apm pipelines. The operator regenerates the ConfigMap
-# and rolls the daemonset pods automatically.
-echo -e "${BOLD}Step 3/4 — Checking OTel daemon collector${NC}"
+# ── 3. Patch OTel collector pipelines ────────────────────────────────────────
+# Three upstream template defects are fixed here, all idempotent.
+echo -e "${BOLD}Step 3/4 — Patching OTel collector pipelines${NC}"
 
 DAEMON_CRD="opentelemetry-kube-stack-daemon"
+GATEWAY_CRD="opentelemetry-kube-stack-gateway"
 
 if kubectl get opentelemetrycollector "$DAEMON_CRD" -n "$NAMESPACE" -o json 2>/dev/null \
     | jq -e '.spec.config.processors["k8sattributes/apm"]' > /dev/null 2>&1; then
@@ -204,6 +197,144 @@ else
     -n "$NAMESPACE" --timeout=120s
 
   success "k8sattributes/apm processor added — k8s.pod.name, container.id, and k8s.node.name will now appear in traces"
+fi
+
+# ── 3b. Fix daemon metrics pipeline: remove kubeletstats/hostmetrics duplicate ─
+# The upstream template puts kubeletstats and hostmetrics in BOTH the "metrics"
+# pipeline (no resource detection) and the "metrics/node/otel" pipeline (full
+# resource detection). OTel fan-outs shared receivers — each metric is sent to
+# the gateway twice. The copy from "metrics" has no host.name set (no
+# resource/hostname processor), and the gateway's two exporters both target the
+# same index, producing continuous 409 version_conflict errors in Elasticsearch.
+#
+# Fix: keep only k8s_cluster in the "metrics" pipeline receivers. kubeletstats
+# and hostmetrics then flow exclusively through "metrics/node/otel", which runs
+# resourcedetection/gcp and resource/hostname to set host.name correctly.
+DAEMON_METRICS_RECEIVERS=$(kubectl get opentelemetrycollector "$DAEMON_CRD" \
+  -n "$NAMESPACE" -o json 2>/dev/null \
+  | jq -r '.spec.config.service.pipelines.metrics.receivers | @csv' 2>/dev/null || echo "")
+
+if echo "$DAEMON_METRICS_RECEIVERS" | grep -q 'kubeletstats\|hostmetrics'; then
+  warn "Daemon metrics pipeline has duplicate kubeletstats/hostmetrics receivers — removing..."
+  kubectl patch opentelemetrycollector "$DAEMON_CRD" \
+    -n "$NAMESPACE" --type=merge \
+    -p '{"spec":{"config":{"service":{"pipelines":{"metrics":{"receivers":["k8s_cluster"]}}}}}}'
+  kubectl rollout status "daemonset/${DAEMON_CRD}-collector" \
+    -n "$NAMESPACE" --timeout=120s
+  success "Daemon metrics pipeline fixed — host metrics flow through metrics/node/otel only (host.name now set)"
+else
+  success "Daemon metrics pipeline already correct (no duplicate receivers)"
+fi
+
+# ── 3c. Fix gateway routing: remove metrics/infra/ecs from hostmetrics route ──
+# The gateway routing connector sends host metrics to both metrics/infra/ecs
+# (elasticsearch/ecs exporter) and metrics/otel (elasticsearch/otel exporter).
+# The ECS exporter falls back to OTel index naming for hostmetrics, so both
+# exporters target the same index and produce 409 version_conflict errors.
+#
+# Fix: route hostmetrics only to metrics/otel. The OTel-format index
+# (metrics-hostmetricsreceiver.otel-default) is the correct destination and
+# Kibana's Infrastructure view can query it directly.
+GATEWAY_ROUTING_PIPELINES=$(kubectl get opentelemetrycollector "$GATEWAY_CRD" \
+  -n "$NAMESPACE" -o json 2>/dev/null \
+  | jq -r '.spec.config.connectors.routing.table[0].pipelines | @csv' 2>/dev/null || echo "")
+
+if echo "$GATEWAY_ROUTING_PIPELINES" | grep -q 'metrics/infra/ecs'; then
+  warn "Gateway hostmetrics routing includes metrics/infra/ecs — removing to stop 409 conflicts..."
+  kubectl patch opentelemetrycollector "$GATEWAY_CRD" \
+    -n "$NAMESPACE" --type=merge \
+    -p '{
+      "spec": {
+        "config": {
+          "connectors": {
+            "routing": {
+              "default_pipelines": ["metrics/otel"],
+              "table": [
+                {
+                  "context": "metric",
+                  "pipelines": ["metrics/otel"],
+                  "statement": "route() where IsMatch(instrumentation_scope.name, \"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal/scraper/*\")"
+                }
+              ]
+            }
+          }
+        }
+      }
+    }'
+  kubectl rollout status "deployment/${GATEWAY_CRD}-collector" \
+    -n "$NAMESPACE" --timeout=120s
+  success "Gateway routing fixed — hostmetrics routed to metrics/otel only (no more 409 conflicts)"
+else
+  success "Gateway hostmetrics routing already correct"
+fi
+
+# ── 3d. Enable opt-in hostmetrics for Kibana Infrastructure view ──────────────
+# The upstream template leaves the cpu, memory, and filesystem scrapers at their
+# defaults (null config), which omits the utilization metrics Kibana's
+# Infrastructure Hosts view requires:
+#   - system.cpu.utilization        → CPU Usage (%)
+#   - system.cpu.logical.count      → Normalized Load denominator
+#   - system.memory.utilization     → Memory Usage (%)
+#   - system.filesystem.utilization → Disk Usage - Max (%)
+# Without these, CPU Usage, Memory Usage, and Normalized Load all show N/A.
+# Disk Usage shows correctly because it falls back to system.filesystem.usage.
+#
+# The filesystem scraper also needs exclude_mount_points and exclude_fs_types
+# (per the EDOT reference values.yaml) to avoid scraping hundreds of virtual
+# filesystems (overlay, proc, sysfs, cgroup, etc.) which create junk TSDB
+# time series and slow down Kibana's Disk view.
+#
+# Fix: explicitly enable the opt-in metrics and add filesystem excludes.
+DAEMON_CPU_UTILIZATION=$(kubectl get opentelemetrycollector "$DAEMON_CRD" \
+  -n "$NAMESPACE" -o json 2>/dev/null \
+  | jq -r '.spec.config.receivers.hostmetrics.scrapers.cpu.metrics["system.cpu.utilization"].enabled // false' \
+  2>/dev/null || echo "false")
+
+if [[ "$DAEMON_CPU_UTILIZATION" != "true" ]]; then
+  warn "Hostmetrics opt-in utilization metrics not enabled — patching cpu/memory/filesystem scrapers..."
+  kubectl patch opentelemetrycollector "$DAEMON_CRD" \
+    -n "$NAMESPACE" --type=merge \
+    -p '{
+      "spec": {
+        "config": {
+          "receivers": {
+            "hostmetrics": {
+              "scrapers": {
+                "cpu": {
+                  "metrics": {
+                    "system.cpu.utilization": {"enabled": true},
+                    "system.cpu.logical.count": {"enabled": true}
+                  }
+                },
+                "memory": {
+                  "metrics": {
+                    "system.memory.utilization": {"enabled": true}
+                  }
+                },
+                "filesystem": {
+                  "metrics": {
+                    "system.filesystem.utilization": {"enabled": true}
+                  },
+                  "exclude_mount_points": {
+                    "mount_points": ["/dev/*","/proc/*","/sys/*","/run/k3s/containerd/*","/var/lib/docker/*","/var/lib/kubelet/*","/snap/*"],
+                    "match_type": "regexp"
+                  },
+                  "exclude_fs_types": {
+                    "fs_types": ["autofs","binfmt_misc","bpf","cgroup2","configfs","debugfs","devpts","devtmpfs","fusectl","hugetlbfs","iso9660","mqueue","nsfs","overlay","proc","procfs","pstore","rpc_pipefs","securityfs","selinuxfs","squashfs","sysfs","tracefs"],
+                    "match_type": "strict"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }'
+  kubectl rollout status "daemonset/${DAEMON_CRD}-collector" \
+    -n "$NAMESPACE" --timeout=120s
+  success "Hostmetrics utilization metrics enabled — CPU Usage, Memory Usage, Normalized Load will now show in Kibana"
+else
+  success "Hostmetrics utilization metrics already enabled"
 fi
 
 echo ""

@@ -321,6 +321,42 @@ kubectl get pods -l app.kubernetes.io/component=recommendation returns \
 no resources — there is nothing to serve traffic.|\
 kubectl get deployment recommendation — READY 0/0, replicas 0. kubectl get pods -l app.kubernetes.io/component=recommendation — no resources found. APM → Service Map — frontend to recommendation edge shows timeouts/errors. APM → Services → recommendation — no recent throughput"
 
+  "chaos-dual-cart-payment|k8s-fault|k8s-faults/scenarios/ctb-dual-cart-payment|-|\
+Checkout is completely broken and users cannot add items to their cart. \
+Two separate things appear to be wrong at the same time.|\
+Two independent faults are active simultaneously. (1) The cart service is in \
+CrashLoopBackOff — users cannot add items, view their cart, or reach checkout \
+at all. kubectl logs on the cart pod shows a fatal Redis connection error on \
+every startup: 'Wasn't able to connect to redis'. (2) The payment service is \
+OOMKilling — even for users who had items in their cart before the incident, \
+checkout fails intermittently as the payment pod gets killed mid-request and \
+restarts. kubectl describe pod payment shows OOMKilled in Last State. The two \
+faults share no common cause and require separate fixes.|\
+Two PRs landed around the same time. A cache-migration PR set the cart \
+VALKEY_ADDR env var to valkey-cart-broken:6379 (wrong hostname). A separate \
+memory-audit PR lowered the payment memory limit to 25Mi — below the Node.js \
+runtime baseline. The cart fault is immediately fatal (CrashLoopBackOff); the \
+payment fault is intermittent (OOMKill under load). Root cause 1: \
+kubectl get deployment cart -o yaml — VALKEY_ADDR=valkey-cart-broken:6379. \
+Root cause 2: kubectl describe pod payment — OOMKilled, memory limit 25Mi.|\
+kubectl get pods — cart in CrashLoopBackOff, payment in OOMKilled/Restarting. APM → Services → cart — no throughput, CrashLoopBackOff. APM → Services → payment — intermittent errors, OOMKill pattern. APM → Service Map — cart and payment edges both broken. Infrastructure → Kubernetes → Pods — payment memory at limit before each kill"
+
+  "chaos-dual-ad-recommendation|k8s-fault|k8s-faults/scenarios/ctb-dual-ad-recommendation|-|\
+Product pages are degraded — ads are loading slowly and product recommendations are not appearing. \
+Checkout and cart are working normally.|\
+Two independent faults are active simultaneously. (1) The ad service is CPU-throttled to 20m — \
+the JVM cannot keep up under normal load; GetAds calls spike to multi-second latency while the pod \
+stays Running. (2) The recommendation service is scaled to 0 replicas — no pods are running; \
+frontend gRPC calls to ListRecommendations fail immediately with UNAVAILABLE. Checkout and cart \
+are unaffected — this is a product-page-only degradation with two separate causes.|\
+Two infrastructure changes landed in the same release window. Ad service: CPU limit set to 20m by \
+an automated rightsizing tool that sampled during a quiet overnight window. Recommendation: replicas \
+set to 0 by a cost-optimisation script that evaluated the service as idle based on a 24h window that \
+missed peak traffic hours. Neither author was aware of the other change. Root cause 1: \
+kubectl get deployment ad -o yaml — resources.limits.cpu: 20m. Root cause 2: \
+kubectl get deployment recommendation — READY 0/0, replicas: 0.|\
+kubectl get pods — ad Running (CPU throttled), recommendation no pods. kubectl top pod ad — CPU at 20m limit. kubectl get deployment recommendation — READY 0/0. APM → Services → ad — GetAds latency spike. APM → Services → recommendation — no throughput (service dark). Infrastructure → Kubernetes → Pods — ad CPU at limit."
+
 )
 
 # ── Helper: filter scenario pool by type ─────────────────────────────────────

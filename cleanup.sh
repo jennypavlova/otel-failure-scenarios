@@ -114,8 +114,7 @@ echo -e "${BOLD}Step 3/4 — Destroying cluster ${CLUSTER_NAME}${NC}"
 if command -v oblt-cli &>/dev/null; then
   info "Submitting destroy request via oblt-cli..."
   info "oblt-robot-ci will DM you on Slack when teardown is complete (~5 min)"
-  # Use --yes equivalent via expect-like echo, since oblt-cli requires interactive confirm
-  echo "yes" | oblt-cli cluster destroy --cluster-name "$CLUSTER_NAME" 2>&1 \
+  oblt-cli cluster destroy --cluster-name "$CLUSTER_NAME" --force 2>&1 \
     | grep -E "\[info\]|\[warn\]|\[error\]" || true
   ok "Destroy request submitted"
 else

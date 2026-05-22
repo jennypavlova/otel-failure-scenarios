@@ -593,3 +593,62 @@ The tell: `Last State: Terminated / Reason: OOMKilled` in `kubectl describe pod`
 | Post-revert (08:54 UTC) | 5 / 0 / 0% — normal volume | 12 / 0 / **0%** |
 
 K8s observation: pod reached `OOMKilled` state 4 times within the first 2 minutes after injection (exit code 137). `kubectl rollout status` confirmed clean recovery within 4 seconds of revert.
+
+---
+
+### Dual Fault: Cart CrashLoopBackOff + Payment OOMKill (`chaos-dual-cart-payment`)
+
+| Field | Value |
+|-------|-------|
+| **Scenario ID** | `chaos-dual-cart-payment` |
+| **Fault folder** | `k8s-faults/scenarios/ctb-dual-cart-payment` |
+| **What breaks** | Two independent faults simultaneously: (1) `cart` `VALKEY_ADDR` set to a non-existent Redis hostname; (2) `payment` memory limit lowered to `25Mi` |
+| **Realistic story** | Two unrelated PRs landed in the same release window. A cache-migration PR set `VALKEY_ADDR=valkey-cart-broken:6379` on the cart service. A memory-audit PR set an aggressive `25Mi` limit on the payment service. Neither author knew about the other. Both passed CI. |
+| **Symptoms** | Checkout is completely broken and users cannot add items to their cart. Two separate things appear to be wrong at the same time — this looks like a single systemic outage but has two independent root causes with different failure modes, different fix procedures, and different investigation paths. |
+| **Root cause** | **(1) Cart:** The cart service (.NET) validates its Redis connection at startup and exits fatally if it fails. `VALKEY_ADDR=valkey-cart-broken:6379` resolves to nothing — the pod crashes immediately on every restart, entering `CrashLoopBackOff`. **(2) Payment:** The Node.js runtime exceeds `25Mi` immediately on startup. Kernel OOMKills the pod (exit code 137). Kubernetes restarts it with exponential backoff, causing bursty payment failures during each restart window. |
+| **Kibana** | APM → Services → cart — no throughput (pod never reaches ready). APM → Services → payment — intermittent bursty errors timed with pod restarts. Infrastructure → Kubernetes → Pods — cart in `CrashLoopBackOff`, payment in `OOMKilled/Restarting`. |
+
+**Design intent:**
+
+This scenario is specifically designed to test whether an agent (or human investigator) can distinguish between two simultaneous unrelated faults rather than inferring a single systemic root cause. The shared blast radius (checkout failures) creates a false signal of one incident. Key divergence points:
+
+- Cart fails **deterministically** and **immediately** — `CrashLoopBackOff` with a clear startup error log.
+- Payment fails **intermittently** and **bursty** — `OOMKilled` with rising RESTARTS but visible recovery windows.
+- The fixes are completely independent: cart needs an env var corrected; payment needs its memory limit removed.
+
+**kubectl investigation:**
+
+```bash
+# Overview — spot both failing pods at once
+kubectl get pods -n <namespace> | grep -E 'cart|payment'
+# → cart:    STATUS CrashLoopBackOff, RESTARTS climbing
+# → payment: STATUS OOMKilled/Running cycling, RESTARTS climbing
+
+# --- Cart fault ---
+kubectl logs -n <namespace> -l app.kubernetes.io/component=cart
+# → "Wasn't able to connect to redis"
+
+kubectl get deployment cart -n <namespace> -o yaml | grep -A2 VALKEY_ADDR
+# → VALKEY_ADDR: valkey-cart-broken:6379
+
+# --- Payment fault ---
+kubectl describe pod -n <namespace> -l app.kubernetes.io/component=payment
+# → Last State: Terminated, Reason: OOMKilled, Exit Code: 137
+
+kubectl get deployment payment -n <namespace> -o yaml | grep -A5 resources
+# → memory: 25Mi under limits
+```
+
+The first tell: `kubectl get pods` shows **two** unhealthy pods in unrelated components. The investigator must resist the temptation to declare a single root cause — cart and payment have different failure modes, different logs, and require different fixes.
+
+**Fixes (both required to restore checkout):**
+
+```bash
+# Fix cart: restore correct Redis address
+kubectl set env deployment/cart -n <namespace> VALKEY_ADDR=valkey-cart:6379
+kubectl rollout status deployment/cart -n <namespace> --timeout=120s
+
+# Fix payment: remove the aggressive memory limit
+kubectl set resources deployment payment -n <namespace> \
+  -c payment --limits=memory=''
+```

@@ -40,6 +40,7 @@ The repo also includes [Elastic Agent Skills](docs/ai-agent-integration.md) so A
 
 ## Table of Contents
 
+- [Quick Start](#quick-start)
 - [Getting Started](#getting-started)
   - [Prerequisites](#prerequisites)
   - [Create the Cluster](#create-the-cluster)
@@ -55,6 +56,52 @@ The repo also includes [Elastic Agent Skills](docs/ai-agent-integration.md) so A
   - [Contributing failure scenarios](#contributing-failure-scenarios)
 - [FAQ](#faq)
 - [Reference](#reference)
+
+---
+
+## Quick Start
+
+For newcomers, two scripts handle everything end-to-end — provisioning, injection, and teardown.
+
+### `./setup.sh` — provision and inject
+
+```bash
+# Full setup: new cluster + random scenario for human investigation
+./setup.sh --slack-id <your-slack-member-id>
+
+# AI agent evaluation: infra-only scenario + ready-made agent prompt
+./setup.sh --slack-id <your-slack-member-id> --mode ai --scenario infra
+
+# Specific scenario injected into an existing cluster
+./setup.sh --cluster oteldemo-rkznd --mode human --scenario chaos-pod-fail-cart
+
+# See all available scenario IDs
+./setup.sh --list
+```
+
+**Options:**
+
+| Flag | Values | Default | Description |
+|------|--------|---------|-------------|
+| `--slack-id` | `U03U8RB2Z1V` | *(prompted)* | Your Slack member ID — oblt-robot-ci DMs you credentials |
+| `--mode` | `human` \| `ai` | `human` | `human` shows a vague symptom hint; `ai` prints a ready-made prompt for your AI agent |
+| `--scenario` | `random` \| `infra` \| `<id>` | `random` | `random` draws from the full pool; `infra` restricts to K8s-native faults (better for AI evaluation); `<id>` injects a specific scenario |
+| `--cluster` | `oteldemo-rkznd` | *(creates new)* | Skip cluster creation and reuse an existing cluster |
+| `--stack-version` | `9.4.0-SNAPSHOT` | *(from .env)* | Elastic stack version to deploy |
+
+> **Finding your Slack member ID:** Slack profile → `⋮` menu → **Copy member ID**. Looks like `U03U8RB2Z1V`.
+
+### `./cleanup.sh` — tear everything down
+
+```bash
+# Destroy cluster, reset failures, clear credentials
+./cleanup.sh --cluster oteldemo-rkznd
+
+# Skip confirmation prompt (for CI / scripted use)
+./cleanup.sh --cluster oteldemo-rkznd --yes
+```
+
+`cleanup.sh` resets all active failure scenarios, stops port-forwards, submits a cluster destroy request via `oblt-cli`, clears credentials from `.env`, and removes the kubectl context. `oblt-robot-ci` will DM you on Slack when the cluster is fully torn down (~5 min).
 
 ---
 

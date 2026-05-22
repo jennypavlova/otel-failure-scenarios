@@ -229,6 +229,10 @@ if [[ -z "$CLUSTER_NAME" ]]; then
 
     [[ $ELAPSED -lt 900 ]] || die "Cluster creation timed out after 15 min."
   done
+
+  # Brief delay for oblt-cli cluster config to propagate after CI merges
+  info "Waiting for cluster config to propagate..."
+  sleep 30
   blank
 else
   info "Step 3/5 — Skipping cluster creation (using ${BOLD}$CLUSTER_NAME${NC})"
